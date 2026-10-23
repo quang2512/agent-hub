@@ -290,7 +290,7 @@ async function findTasksDir($: EngineInterface): Promise<string | undefined> {
   return undefined
 }
 
-// Reads each running shell's log when it grew; the log's exit line ends the shell.
+// Reads each running shell's log when it grew; the log's exit or killed line ends the shell.
 async function pollShells($: EngineInterface) {
   const running = (await read($, shells)).filter(one => one.status === 'running')
   if (running.length === 0) return
@@ -308,17 +308,23 @@ async function pollShells($: EngineInterface) {
       continue
     }
     if (stat.size === row.size) continue
+    const endOf = ({ exitCode, isKilled }: ReturnType<typeof readLog>): Partial<ShellRow> =>
+      isKilled === true
+        ? { status: 'stopped', endedAt: t }
+        : exitCode === undefined
+          ? {}
+          : { status: exitCode === 0 ? 'done' : 'failed', exitCode, endedAt: t }
     if (stat.size > MAX_LOG_BYTES) {
       const tail = [`… ${formatTokens(stat.size)}B of output, too much to tail here`]
-      await update($, shells, rows => patchRunning(rows, row.id, { tail, size: stat.size }))
+      // Too big to read whole, its last bytes still carry the exit or killed line.
+      const last = await $.process.run(['tail', '-c', '64', path], { timeoutMs: 5000 }).then(run => run.stdout, () => '')
+      await update($, shells, rows => patchRunning(rows, row.id, { tail, size: stat.size, ...endOf(readLog(last)) }))
       continue
     }
     const text = await $.fs.read(path).catch(() => undefined)
     if (typeof text !== 'string') continue
-    const { tail, exitCode } = readLog(text)
-    const end: Partial<ShellRow> =
-      exitCode === undefined ? {} : { status: exitCode === 0 ? 'done' : 'failed', exitCode, endedAt: t }
-    await update($, shells, rows => patchRunning(rows, row.id, { tail, size: stat.size, ...end }))
+    const log = readLog(text)
+    await update($, shells, rows => patchRunning(rows, row.id, { tail: log.tail, size: stat.size, ...endOf(log) }))
   }
 }
 

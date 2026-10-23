@@ -2,7 +2,8 @@
 // moved there (Ctrl+B, a timeout), by the main conversation or a subagent.
 // A foreground command is the transcript's to show. The engine writes a
 // background command's output to `<tasks dir>/<id>.output`, the path its
-// result names, and ends the file `[exited with code N]` when it exits.
+// result names, and ends the file `[exited with code N]` when it exits, or
+// `[killed]` when it is stopped (TaskStop, the tasks dialog, its agent ending).
 
 import type { ShellRow } from '../types'
 import { redact } from './steps'
@@ -17,15 +18,15 @@ export const KEEP_LINES = 40
 /** A larger log is not read: one read copies the whole file. */
 export const MAX_LOG_BYTES = 256 * 1024
 
-const EXIT_TRAILER = /\n*\[exited with code (-?\d+)\]\s*$/
+const EXIT_TRAILER = /\n*\[(?:exited with code (-?\d+)|killed)\]\s*$/
 // CSI and OSC sequences, then any other control character but tab, newline, return.
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
 // "… Output is being written to: /…/tasks/b1x2y3.output. …"
 const LOG_PATH = /(\/\S+\/(b[a-z0-9]+)\.output)\b/
 
-/** The latest lines of a log as a terminal shows them, and its exit code once it has one. */
-export function readLog(text: string, keep = KEEP_LINES): { tail: string[]; exitCode?: number } {
+/** The latest lines of a log as a terminal shows them, and how it ended once it has: its exit code, or killed. */
+export function readLog(text: string, keep = KEEP_LINES): { tail: string[]; exitCode?: number; isKilled?: true } {
   const exit = EXIT_TRAILER.exec(text)
   const body = exit === null ? text : text.slice(0, exit.index)
   const lines = body
@@ -36,7 +37,9 @@ export function readLog(text: string, keep = KEEP_LINES): { tail: string[]; exit
   while (lines.length > 0 && lines.at(-1) === '') lines.pop()
   const tail = lines.slice(-keep).map(redact)
 
-  return exit === null ? { tail } : { tail, exitCode: Number(exit[1]) }
+  if (exit === null) return { tail }
+
+  return exit[1] === undefined ? { tail, isKilled: true } : { tail, exitCode: Number(exit[1]) }
 }
 
 /**

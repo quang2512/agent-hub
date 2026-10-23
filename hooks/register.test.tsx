@@ -923,6 +923,65 @@ test("a background shell runs until its log's exit line, under the agent that st
   await ui.unmount()
 })
 
+test('a shell killed outside a TaskStop call (the tasks dialog, its agent ending) stops at its log\'s `[killed]`', async ($, on) => {
+  const { clock } = engine(on)
+  const files = tasksDir(on)
+  const start = starts(on)
+  on('tool.call', () => ({
+    result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsrv' },
+    text: 'Command running in background with ID: bsrv. Output is being written to: /private/tmp/claude-501/-proj/sid/tasks/bsrv.output',
+  }))
+  await start($)
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', run_in_background: true, tool_use_id: 'u1' } as never)
+  files['bsrv.output'] = { text: 'ready on :3000\n', mtimeMs: 2_000_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 1 running · 0 done$/ })).toBeDefined()
+
+  files['bsrv.output'] = { text: 'ready on :3000\n\n[killed]\n', mtimeMs: 2_001_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 0 running · 1 done$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· stopped$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '[killed]' })).toBeUndefined()
+
+  await ui.unmount()
+})
+
+test('a log too big to read still ends its shell, by its last bytes', async ($, on) => {
+  const { clock } = engine(on)
+  const files = tasksDir(on)
+  const start = starts(on)
+  on('tool.call', () => ({
+    result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsrv' },
+    text: 'Command running in background with ID: bsrv. Output is being written to: /private/tmp/claude-501/-proj/sid/tasks/bsrv.output',
+  }))
+  on('process.run', (_$, e) =>
+    e.argv[0] === 'tail'
+      ? ({ value: { exitCode: 0, stdout: (files['bsrv.output']?.text ?? '').slice(-64), stderr: '' } } as never)
+      : { deny: 'unexpected' },
+  )
+  await start($)
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', run_in_background: true, tool_use_id: 'u1' } as never)
+  const chatty = 'GET / 200\n'.repeat(30_000)
+  files['bsrv.output'] = { text: chatty, mtimeMs: 2_000_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 1 running · 0 done$/ })).toBeDefined()
+
+  files['bsrv.output'] = { text: `${chatty}\n[killed]\n`, mtimeMs: 2_001_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 0 running · 1 done$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /· stopped$/ })).toBeDefined()
+
+  await ui.unmount()
+})
+
 test('no shell yet, no Shells group', async ($, on) => {
   engine(on)
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
