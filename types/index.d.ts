@@ -137,7 +137,7 @@ export type ShellRow = {
   startedAt: number
   endedAt?: number
   exitCode?: number
-  /** The log's latest lines, oldest first, ANSI and secrets removed. */
+  /** The log's latest lines (KEEP_LINES of them), oldest first, ANSI and secrets removed; a card draws the last few. */
   tail: string[]
   /** The log's size when last read; it is read again only when that changes. */
   size?: number
@@ -168,8 +168,10 @@ declare module 'claude-code' {
       selected: string | null
       /** Messages sent from the pane, counted: the field is drawn anew after each. */
       sendCount: number
-      /** The agent a first press of stop asked about; a second press stops it. */
+      /** The agent, or `shell:<id>` the shell, a first press of stop asked about; a second press stops it. */
       confirmStop: string | null
+      /** The shell the pane shows in detail, by its id; null shows the list. */
+      selectedShell: string | null
       /** The context window the session's last response filled: its tokens and its size; null before a reading. */
       context: { tokens: number; window: number } | null
       /** The prompt cache as the main conversation's latest request left it; null before one. */

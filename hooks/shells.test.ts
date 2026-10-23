@@ -1,7 +1,20 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { ShellRow } from '../types'
-import { clip, commandLine, MAX_SHELLS, patchRunning, readLog, spawnedOf, startShell, visibleShells } from './shells'
+import {
+  clip,
+  commandLine,
+  commandLines,
+  isStoppable,
+  KEEP_LINES,
+  MAX_SHELLS,
+  patchRunning,
+  readLog,
+  shellHistory,
+  spawnedOf,
+  startShell,
+  visibleShells,
+} from './shells'
 
 const shell = (id: string, extra: Partial<ShellRow> = {}): ShellRow => ({
   id,
@@ -65,5 +78,30 @@ describe('shells', () => {
     expect(commandLine('cd app &&\n  npm run dev')).toBe('cd app && …')
     expect(clip('npm run build', 8)).toBe('npm run…')
     expect(clip('ls', 8)).toBe('ls')
+  })
+
+  test('a log keeps its latest KEEP_LINES lines for the detail', () => {
+    const text = Array.from({ length: KEEP_LINES + 10 }, (_, i) => `line ${i + 1}`).join('\n')
+    const { tail } = readLog(text)
+
+    expect(tail).toHaveLength(KEEP_LINES)
+    expect(tail[0]).toBe('line 11')
+    expect(tail.at(-1)).toBe(`line ${KEEP_LINES + 10}`)
+  })
+
+  test('the detail shows every line of a command, secrets masked', () => {
+    expect(commandLines('cd app &&\n\n  deploy --token=abc123 now   \n')).toEqual(['cd app &&', '  deploy --token=*** now'])
+  })
+
+  test('only a shell still running can be stopped', () => {
+    expect(isStoppable(shell('a'))).toBe(true)
+    expect(isStoppable(shell('b', { status: 'done' }))).toBe(false)
+    expect(isStoppable(shell('c', { status: 'stopped' }))).toBe(false)
+  })
+
+  test('every shell is listed newest first', () => {
+    const order = shellHistory([shell('old', { startedAt: 1 }), shell('new', { startedAt: 3 }), shell('mid', { startedAt: 2 })])
+
+    expect(order.map(one => one.id)).toEqual(['new', 'mid', 'old'])
   })
 })

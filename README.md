@@ -48,7 +48,7 @@ Shells: 1 running · 1 done
 - **Context**: how full the session's context window is, as one bar the width of the pane (red from 80%).
 - **Tasks**: the main conversation's checklist, with the tool calls made under the item in progress. A finished item folds to a count.
 - **Subagents**: one card per subagent of the latest prompt, plus any still running: its type, elapsed time, tokens, the steps it has taken and, if it keeps one, its checklist. A finished card folds to one line.
-- **Shells**: every shell the session spawns, as subagents are: a Bash command the main conversation or a subagent runs in the background, or moves there (Ctrl+B, a timeout). Each gets a small terminal, the command pinned on top and the latest lines of its output scrolling under it, until it exits with its code. Commands run in the foreground are left to the transcript. Output is read from the log Claude Code writes for the command, with colours and anything that looks like a secret removed.
+- **Shells**: every shell the session spawns, as subagents are: a Bash command the main conversation or a subagent runs in the background, or moves there (Ctrl+B, a timeout). Each gets a small terminal, the command pinned on top and the latest lines of its output scrolling under it, until it exits with its code. Commands run in the foreground are left to the transcript. Output is read from the log Claude Code writes for the command, with colours and anything that looks like a secret removed. Enter on a shell opens it whole: every line of the command, its last 40 lines of output, and every shell of the session.
 - **Usage**, at the foot: the account's 5-hour and 7-day limits on one line, how much of each is used and when it resets (↻; only when signed in with a Claude subscription).
 
 ## Requirements
@@ -81,13 +81,13 @@ The pane opens by itself when a session starts and the terminal is wide enough; 
 | Key | Where | Does |
 | --- | --- | --- |
 | ↑ ↓ / Tab | list | move between cards |
-| Enter | list | open a subagent's detail: every step and its status |
+| Enter | list | open a subagent's detail: every step and its status, or a shell's: its whole command and output |
 | `e` | list | compact / expanded cards |
 | `a` | list | all subagents of the session / only the latest prompt's |
 | `m` | list | show the main conversation |
 | `b` | detail | back to the list |
 | `v` | detail | view the subagent's transcript |
-| `s` `s` | detail | stop the subagent (press twice within 3 s) |
+| `s` `s` | detail | stop the subagent, or a running shell (press twice within 3 s) |
 | Message box | detail | send the subagent a message |
 
 A card warns when a subagent may be stuck: no step for two minutes, the same call repeated, or several errors in a row.

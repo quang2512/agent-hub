@@ -55,10 +55,13 @@ import {
 import {
   clip,
   commandLine,
+  commandLines,
   DONE_TAIL_LINES,
+  isStoppable,
   MAX_LOG_BYTES,
   patchRunning,
   readLog,
+  shellHistory,
   spawnedOf,
   startShell,
   TAIL_LINES,
@@ -155,6 +158,7 @@ const TASK_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList',
 const TASK_LOG_STEPS = 6
 const now = atom({ plugin: 'agent-hub', key: 'now' } as const, 0)
 const selected = atom({ plugin: 'agent-hub', key: 'selected' } as const, null)
+const selectedShell = atom({ plugin: 'agent-hub', key: 'selectedShell' } as const, null)
 const sendCount = atom({ plugin: 'agent-hub', key: 'sendCount' } as const, 0)
 const confirmStop = atom({ plugin: 'agent-hub', key: 'confirmStop' } as const, null)
 const isExpanded = atom({ plugin: 'agent-hub', key: 'isExpanded' } as const, true)
@@ -231,6 +235,7 @@ const TASK_GLYPH: Record<TodoStatus, string> = { pending: '□', in_progress: '�
 const TASK_COLOR: Record<TodoStatus, string | undefined> = { pending: undefined, in_progress: 'claude', completed: 'success' }
 const SHELL_GLYPH: Record<ShellStatus, string> = { running: '●', done: '✓', failed: '✗', stopped: '⊘' }
 const SHELL_COLOR: Record<ShellStatus, string> = { running: 'claude', done: 'success', failed: 'error', stopped: 'warning' }
+const SHELL_WORD: Record<ShellStatus, string> = { running: 'running', done: 'done', failed: 'failed', stopped: 'stopped' }
 const TASK_WORD: Record<TodoStatus, string> = { pending: 'pending', in_progress: 'in progress', completed: 'done' }
 
 // The pane's heading, "Subagents": Claude's orange, as the theme spells it.
@@ -251,6 +256,8 @@ const HEADER_WIDTH = 9 + 2 + NAME_ART[0]!.length
 
 const openKey = (id: string) => `open:${id}`
 const childKey = (id: string) => `child:${id}`
+const shellKey = (id: string) => `shell:${id}`
+const historyKey = (id: string) => `history:${id}`
 
 let ticks = 0
 // Where the engine writes the session's command logs, when a result did not
@@ -378,8 +385,37 @@ async function failStep($: EngineInterface, log: Log, key: string, stepId: strin
 // Shows one agent (or the list, for null) and puts the focus ring on `key`
 // once the next drawing has it; a pane not holding the keys refuses, harmlessly.
 async function show($: EngineInterface, id: string | null, key: string) {
+  await update($, selectedShell, () => null)
   await update($, selected, () => id)
   await $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
+}
+
+// Shows one shell (or the list, for null), the focus ring on `key` as show puts it.
+async function showShell($: EngineInterface, id: string | null, key: string) {
+  await update($, selected, () => null)
+  await update($, selectedShell, () => id)
+  await $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
+}
+
+// The first press asks; a second within CONFIRM_MS stops the background command.
+async function stopShell($: EngineInterface, row: ShellRow) {
+  const asking = shellKey(row.id)
+  if ((await read($, confirmStop)) !== asking) {
+    await update($, confirmStop, () => asking)
+    $.clock.after(CONFIRM_MS, () => void update($, confirmStop, id => (id === asking ? null : id)).catch(() => undefined))
+
+    return
+  }
+  await update($, confirmStop, () => null)
+  const ran = await $.tool.call({ tool: 'TaskStop', task_id: row.taskId })
+  if (ran.deny !== undefined || ran.isError === true) {
+    $.ui.toast(`Agent Hub: could not stop the command: ${ran.deny ?? ran.text ?? 'unknown error'}`)
+
+    return
+  }
+  const t = await $.clock.now()
+  await update($, shells, list => patchRunning(list, row.id, { status: 'stopped', endedAt: t }))
+  $.ui.toast('Agent Hub: stopped the command')
 }
 
 // Puts an agent's transcript in the main view, or the main conversation back
@@ -1035,6 +1071,7 @@ export const register: Register = on => {
     const acts = await read($, activity)
     const t = await read($, now)
     const shown = await read($, selected)
+    const shownShell = await read($, selectedShell)
     const sends = await read($, sendCount)
     const asking = await read($, confirmStop)
     const expanded = await read($, isExpanded)
@@ -1576,18 +1613,28 @@ export const register: Register = on => {
     const shownShells = visibleShells(shellRows, currentPrompt)
     const shellsRunning = shellRows.filter(one => one.status === 'running').length
     const shellTime = (one: ShellRow) => formatElapsed(Math.max(0, (one.endedAt ?? Math.max(t, one.startedAt)) - one.startedAt))
-    const shellCard = (one: ShellRow) => {
-      const isRunning = one.status === 'running'
-      const width = Math.max(MIN_CARD_WIDTH, columns)
-      const inner = innerWidth(width)
-      const owner = one.agentId === undefined ? 'main' : (rows[one.agentId]?.type ?? 'agent')
-      const end = isRunning
+    const ownerOf = (one: ShellRow) => (one.agentId === undefined ? 'main' : (rows[one.agentId]?.type ?? 'agent'))
+    const endOf = (one: ShellRow) =>
+      one.status === 'running'
         ? ''
         : one.status === 'stopped'
           ? ' · stopped'
           : one.exitCode === undefined
             ? ''
             : ` · exit ${one.exitCode}`
+    // What a shell's top border carries: its status and description, its owner and time.
+    const shellTitle = (one: ShellRow, style: (segs: Seg[]) => Seg[]) => ({
+      left: style([
+        { text: one.status === 'running' ? frame : SHELL_GLYPH[one.status], color: SHELL_COLOR[one.status] },
+        { text: ` ${one.description ?? 'shell'}`, color: 'text', bold: one.status === 'running' },
+      ]),
+      right: style([{ text: `${ownerOf(one)} · ${shellTime(one)}${endOf(one)}`, color: 'text' }]),
+    })
+    // A card in the group is one Button, as an agent's is: Enter opens its detail.
+    const shellCard = (one: ShellRow, isFirst: boolean) => {
+      const isRunning = one.status === 'running'
+      const width = Math.max(MIN_CARD_WIDTH, columns)
+      const inner = innerWidth(width)
       const keep = isRunning ? TAIL_LINES : DONE_TAIL_LINES
       const tail = one.tail.slice(-keep)
       const logRows: Line[] = [
@@ -1605,20 +1652,101 @@ export const register: Register = on => {
         ...Array.from({ length: blank }, (): Line => []),
       ]
       const dimmed = (segs: Seg[]) => (isRunning ? segs : segs.map(seg => ({ ...seg, dim: true })))
-      const title = {
-        left: dimmed([
-          { text: isRunning ? frame : SHELL_GLYPH[one.status], color: SHELL_COLOR[one.status] },
-          { text: ` ${one.description ?? 'shell'}`, color: 'text', bold: isRunning },
-        ]),
-        right: dimmed([{ text: `${owner} · ${shellTime(one)}${end}`, color: 'text' }]),
-      }
 
       return (
-        <Text key={`shell:${one.id}`}>
-          {drawLines(framed(body.map(dimmed), width, { color: SHELL_COLOR[one.status], dim: !isRunning }, title))}
-        </Text>
+        <Button key={shellKey(one.id)} plain autoFocus={isFirst || undefined} onPress={() => showShell($, one.id, 'back')}>
+          {drawLines(framed(body.map(dimmed), width, { color: SHELL_COLOR[one.status], dim: !isRunning }, shellTitle(one, dimmed)))}
+        </Button>
       )
     }
+
+    // One shell whole: every line of its command, how it ended, the lines of
+    // its log the pane keeps, and every command of the session to go to next.
+    const shellDetail = (one: ShellRow) => {
+      const width = Math.max(MIN_CARD_WIDTH, columns)
+      const inner = innerWidth(width)
+      const isRunning = one.status === 'running'
+      const command = commandLines(one.command)
+      const card = framed(
+        [
+          ...command.flatMap((line, i) =>
+            layoutRow(
+              [
+                { text: i === 0 ? '$ ' : '  ', color: TITLE_COLOR, bold: true },
+                { text: line, bold: isRunning },
+              ],
+              undefined,
+              inner,
+              2,
+            ),
+          ),
+          ...layoutRow(
+            [
+              { text: SHELL_WORD[one.status], color: SHELL_COLOR[one.status] },
+              { text: `${endOf(one)} · ${ownerOf(one)}`, dim: true },
+            ],
+            undefined,
+            inner,
+          ),
+        ],
+        width,
+        { color: SHELL_COLOR[one.status], dim: !isRunning },
+        shellTitle(one, segs => segs),
+      )
+      const history = shellHistory(shellRows)
+
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={3}>
+            <Button key="back" plain hotkey="b" autoFocus label="← back to list" onPress={() => showShell($, null, shellKey(one.id))} />
+            {isStoppable(one) && (
+              <Button
+                key="stop"
+                plain
+                hotkey="s"
+                label={asking === shellKey(one.id) ? 'press s again to stop' : 'stop command'}
+                onPress={() => stopShell($, one)}
+              />
+            )}
+          </Box>
+          <Box marginTop={1}>
+            <Text>{drawLines(card)}</Text>
+          </Box>
+
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>
+              Output
+              <Text dimColor>{one.tail.length > 0 ? ` · last ${plural(one.tail.length, 'line')}` : ''}</Text>
+            </Text>
+            {one.tail.length === 0 && <Text dimColor>{isRunning ? 'waiting for output…' : 'no output'}</Text>}
+            {one.tail.map((line, i) => (
+              <Text key={`out:${i}`} dimColor wrap="truncate-end">
+                {line === '' ? ' ' : line}
+              </Text>
+            ))}
+          </Box>
+
+          {history.length > 1 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold>All commands</Text>
+              {history.map(other => (
+                <Button key={historyKey(other.id)} plain onPress={() => showShell($, other.id, 'back')}>
+                  <Text color={SHELL_COLOR[other.status]}>{other.status === 'running' ? frame : SHELL_GLYPH[other.status]}</Text>
+                  <Text bold={other.id === one.id}> {clip(other.description ?? commandLine(other.command), Math.max(1, inner - 24))}</Text>
+                  <Text dimColor>
+                    {' '}
+                    {ownerOf(other)} · {shellTime(other)}
+                    {endOf(other)}
+                  </Text>
+                </Button>
+              ))}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+    const openShell = shownShell === null ? undefined : shellRows.find(one => one.id === shownShell)
+    if (openShell !== undefined) return shellDetail(openShell)
     const shellGroup =
       shellRows.length === 0 ? null : (
         <Box flexDirection="column">
@@ -1627,7 +1755,7 @@ export const register: Register = on => {
               <Text color={TITLE_COLOR}>Shells</Text>: {shellsRunning} running · {shellRows.length - shellsRunning} done
             </Text>
           </Text>
-          {shownShells.map(shellCard)}
+          {shownShells.map((one, index) => shellCard(one, lines.length === 0 && index === 0))}
         </Box>
       )
 

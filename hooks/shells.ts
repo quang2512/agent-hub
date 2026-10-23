@@ -8,10 +8,12 @@ import type { ShellRow } from '../types'
 import { redact } from './steps'
 
 export const MAX_SHELLS = 30
-/** The log lines a shell keeps, and a running card draws. */
+/** The log lines a running card draws. */
 export const TAIL_LINES = 5
 /** The log lines a finished card keeps drawn. */
 export const DONE_TAIL_LINES = 2
+/** The log lines a shell keeps, for its detail; its card draws the last few. */
+export const KEEP_LINES = 40
 /** A larger log is not read: one read copies the whole file. */
 export const MAX_LOG_BYTES = 256 * 1024
 
@@ -23,7 +25,7 @@ const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g
 const LOG_PATH = /(\/\S+\/(b[a-z0-9]+)\.output)\b/
 
 /** The latest lines of a log as a terminal shows them, and its exit code once it has one. */
-export function readLog(text: string, keep = TAIL_LINES): { tail: string[]; exitCode?: number } {
+export function readLog(text: string, keep = KEEP_LINES): { tail: string[]; exitCode?: number } {
   const exit = EXIT_TRAILER.exec(text)
   const body = exit === null ? text : text.slice(0, exit.index)
   const lines = body
@@ -78,3 +80,17 @@ export function commandLine(command: string): string {
 
   return lines.length > 1 ? `${first} …` : first
 }
+
+/** The command as its detail shows it: every line, trimmed, secrets masked. */
+export const commandLines = (command: string): string[] =>
+  command
+    .split('\n')
+    .map(line => redact(line.trimEnd()))
+    .filter(line => line.trim() !== '')
+
+/** A shell still running: TaskStop takes its id. */
+export const isStoppable = (row: ShellRow): boolean => row.status === 'running'
+
+/** Every shell of the session, newest first, as the detail lists them. */
+export const shellHistory = (shells: readonly ShellRow[]): ShellRow[] =>
+  [...shells].sort((a, b) => b.startedAt - a.startedAt)

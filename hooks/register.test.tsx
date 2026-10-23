@@ -930,3 +930,117 @@ test('no shell yet, no Shells group', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^Shells/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('enter on a shell opens it whole: its command, every line it keeps, and back', async ($, on) => {
+  const { clock } = engine(on)
+  const files = tasksDir(on)
+  const start = starts(on)
+  const printed = Array.from({ length: 8 }, (_, i) => `step ${i + 1}`).join('\n')
+  on('tool.call', () => ({
+    result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsteps' },
+    text: 'Command running in background with ID: bsteps.',
+  }))
+  await start($)
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'cd app &&\n  ./run.sh --token=abc123',
+    description: 'Run the steps',
+    run_in_background: true,
+    tool_use_id: 'u1',
+  } as never)
+  files['bsteps.output'] = { text: `${printed}\n\n[exited with code 0]\n`, mtimeMs: 2_000_000 }
+  await clock.advance(2000)
+  await clock.settle()
+  // The card draws a finished command's last two lines.
+  expect(await ui.find({ type: 'Text', text: 'step 8' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'step 3' })).toBeUndefined()
+
+  await ui.press({ key: 'shell:u1' })
+  expect(await ui.find({ key: 'back' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' · last 8 lines' })).toBeDefined()
+  for (let i = 1; i <= 8; i += 1) expect(await ui.find({ type: 'Text', text: `step ${i}` })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'cd app &&' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: './run.sh --token=***' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /abc123/ })).toBeUndefined()
+  // A shell that has exited offers no stop.
+  expect(await ui.find({ key: 'stop' })).toBeUndefined()
+
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ key: 'back' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 0 running · 1 done$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the detail lists every shell of the session, newest first, each one opening', async ($, on) => {
+  const { clock } = engine(on)
+  const files = tasksDir(on)
+  const start = starts(on)
+  on('tool.call', (_$, e) => {
+    const id = `b${String(e.tool_use_id)}`
+
+    return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: id }, text: `Command running in background with ID: ${id}.` }
+  })
+  await start($)
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run build', description: 'Build', run_in_background: true, tool_use_id: 'u1' } as never)
+  files['bu1.output'] = { text: 'out of u1\n', mtimeMs: 2_000_000 }
+  await clock.advance(1000)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'Test', run_in_background: true, tool_use_id: 'u2' } as never)
+  files['bu2.output'] = { text: 'out of u2\n', mtimeMs: 2_000_000 }
+  await clock.advance(2000)
+  await clock.settle()
+
+  await ui.press({ key: 'shell:u2' })
+  const listed = (await ui.findAll({ type: 'Button' })).map(one => one.key).filter(key => key?.startsWith('history:'))
+  expect(listed).toEqual(['history:u2', 'history:u1'])
+
+  await ui.press({ key: 'history:u1' })
+  expect(await ui.find({ type: 'Text', text: 'npm run build' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'out of u1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a running shell stops from its detail on a second press of s', async ($, on) => {
+  const { clock } = engine(on)
+  const stops: unknown[] = []
+  on('tool.call', (_$, e) => {
+    if (String(e.tool) === 'TaskStop') {
+      stops.push(e.task_id)
+
+      return { result: { success: true }, text: 'stopped' }
+    }
+
+    return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsrv' }, text: 'Command running in background with ID: bsrv.' }
+  })
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', run_in_background: true, tool_use_id: 'u1' } as never)
+  await clock.settle()
+  await ui.press({ key: 'shell:u1' })
+  expect((await ui.find({ key: 'stop' }))?.props.label).toBe('stop command')
+
+  await ui.press({ key: 'stop' })
+  expect((await ui.find({ key: 'stop' }))?.props.label).toBe('press s again to stop')
+  expect(stops).toEqual([])
+
+  await ui.press({ key: 'stop' })
+  await clock.settle()
+  expect(stops).toEqual(['bsrv'])
+  expect(await ui.find({ key: 'stop' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'stopped' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('with no agent card, the focus ring starts on the first shell', async ($, on) => {
+  const { clock } = engine(on)
+  on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bls' }, text: 'Command running in background with ID: bls.' }))
+  await $.tool.call({ tool: 'Bash', command: 'ls', run_in_background: true, tool_use_id: 'u1' } as never)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  const focused = (await ui.findAll({ type: 'Button' })).filter(one => one.props.autoFocus === true)
+  expect(focused.map(one => one.key)).toEqual(['shell:u1'])
+})
