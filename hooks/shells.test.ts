@@ -8,12 +8,14 @@ import {
   isStoppable,
   KEEP_LINES,
   MAX_SHELLS,
+  OUTPUT_GRACE_MS,
   patchRunning,
   readLog,
   shellHistory,
   spawnedOf,
   startShell,
   visibleShells,
+  waitingNote,
 } from './shells'
 
 const shell = (id: string, extra: Partial<ShellRow> = {}): ShellRow => ({
@@ -103,5 +105,14 @@ describe('shells', () => {
     const order = shellHistory([shell('old', { startedAt: 1 }), shell('new', { startedAt: 3 }), shell('mid', { startedAt: 2 })])
 
     expect(order.map(one => one.id)).toEqual(['new', 'mid', 'old'])
+  })
+
+  test('a running shell with no log file past the grace reads as not followed live', () => {
+    const quiet = shell('q', { startedAt: 1000 })
+
+    expect(waitingNote(quiet, 1000 + OUTPUT_GRACE_MS - 1)).toBe('waiting for output…')
+    expect(waitingNote(quiet, 1000 + OUTPUT_GRACE_MS)).toBe('live output unavailable · its log was not found')
+    // Its log was read: a quiet command is still only waiting.
+    expect(waitingNote({ ...quiet, size: 0 }, 1000 + 60_000)).toBe('waiting for output…')
   })
 })

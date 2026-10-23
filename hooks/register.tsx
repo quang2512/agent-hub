@@ -66,6 +66,7 @@ import {
   startShell,
   TAIL_LINES,
   visibleShells,
+  waitingNote,
 } from './shells'
 import {
   applyStepEnd,
@@ -1639,7 +1640,7 @@ export const register: Register = on => {
       const tail = one.tail.slice(-keep)
       const logRows: Line[] = [
         ...tail.map(text => [{ text: clip(text, inner), dim: true }]),
-        ...(isRunning && tail.length === 0 ? [[{ text: 'waiting for output…', dim: true }]] : []),
+        ...(isRunning && tail.length === 0 ? [[{ text: waitingNote(one, t), dim: true }]] : []),
       ]
       // Running, the log keeps its rows, filled from the top as it grows.
       const blank = isRunning ? Math.max(0, TAIL_LINES - logRows.length) : 0
@@ -1718,7 +1719,7 @@ export const register: Register = on => {
               Output
               <Text dimColor>{one.tail.length > 0 ? ` · last ${plural(one.tail.length, 'line')}` : ''}</Text>
             </Text>
-            {one.tail.length === 0 && <Text dimColor>{isRunning ? 'waiting for output…' : 'no output'}</Text>}
+            {one.tail.length === 0 && <Text dimColor>{isRunning ? waitingNote(one, t) : 'no output'}</Text>}
             {one.tail.map((line, i) => (
               <Text key={`out:${i}`} dimColor wrap="truncate-end">
                 {line === '' ? ' ' : line}
