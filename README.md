@@ -92,6 +92,16 @@ The pane opens by itself when a session starts and the terminal is wide enough; 
 
 A card warns when a subagent may be stuck: no step for two minutes, the same call repeated, or several errors in a row.
 
+### Alerts
+
+You need not watch the pane: when a running subagent may be stuck, or the context window passes 80% (compaction is near), Agent Hub says so once in a toast. A subagent that recovers and stalls again is said again; so is a context that was compacted and fills up again. The `alerts` option, in the plugin's settings (`/config`), chooses how:
+
+| `alerts` | Does |
+| --- | --- |
+| `toast` (default) | a toast in Claude Code |
+| `notify` | the toast, and a notification through your terminal's notification channel (iTerm2, kitty, Ghostty or the bell), for when you are in another window |
+| `off` | nothing; the pane still shows it |
+
 ### Checklists for subagents
 
 Subagents have no checklist tool of their own, so Agent Hub registers one, `mcp__agent-hub__checklist`. A subagent that calls it shows its checklist inside its card, with its calls under the item in progress. Ask for it in the prompt you give the subagent, for example: *"Keep a checklist with the checklist tool."*

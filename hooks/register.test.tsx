@@ -930,3 +930,80 @@ test('no shell yet, no Shells group', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^Shells/ })).toBeUndefined()
   await ui.unmount()
 })
+
+// The toasts and notifications the pane raised, as the engine's own hooks hear them.
+function heard(on: On) {
+  const toasts: string[] = []
+  const notes: { text: string; title?: string }[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+
+    return { value: undefined } as never
+  })
+  on('ui.notify', (_$, e) => {
+    notes.push({ text: e.text, title: e.title })
+
+    return { value: { isSent: true, channel: 'kitty' } } as never
+  })
+
+  return { toasts, notes }
+}
+
+test('a running agent that may be stuck is toasted once', async ($, on) => {
+  const { roster, clock } = engine(on)
+  const start = starts(on)
+  const { toasts, notes } = heard(on)
+  roster.list = [{ id: 'a1', type: 'Explore', description: 'map the routes', status: 'running' }]
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1', agentId: 'a1' })
+  await clock.settle()
+
+  await clock.advance(60_000)
+  expect(toasts).toEqual([])
+
+  await clock.advance(70_000)
+  expect(toasts).toHaveLength(1)
+  expect(toasts[0]).toMatch(/^Agent Hub: Explore may be stuck: no tool call for 2:0\d$/)
+
+  await clock.advance(60_000)
+  expect(toasts).toHaveLength(1)
+  // Under the default, no notification.
+  expect(notes).toEqual([])
+})
+
+test('the context passing 80% is toasted once', async ($, on) => {
+  engine(on)
+  const { toasts } = heard(on)
+  const measure = (tokens: number) =>
+    $.session.measure({ context: { tokens, window: 1_000_000 }, rateLimits: [], changed: ['context'] } as never)
+
+  await measure(500_000)
+  await measure(790_000)
+  expect(toasts).toEqual([])
+  await measure(820_000)
+  await measure(900_000)
+  expect(toasts).toEqual(['Agent Hub: context 82% full: compaction is near'])
+})
+
+test('under alerts: notify, a notification goes beside the toast', { options: { alerts: 'notify' } }, async ($, on) => {
+  engine(on)
+  const { toasts, notes } = heard(on)
+  await $.session.measure({ context: { tokens: 850_000, window: 1_000_000 }, rateLimits: [], changed: ['context'] } as never)
+
+  expect(toasts).toEqual(['Agent Hub: context 85% full: compaction is near'])
+  expect(notes).toEqual([{ text: 'context 85% full: compaction is near', title: 'Agent Hub' }])
+})
+
+test('under alerts: off, nothing is said', { options: { alerts: 'off' } }, async ($, on) => {
+  const { roster, clock } = engine(on)
+  const start = starts(on)
+  const { toasts, notes } = heard(on)
+  roster.list = [{ id: 'a1', type: 'Explore', description: 'map the routes', status: 'running' }]
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1', agentId: 'a1' })
+  await $.session.measure({ context: { tokens: 850_000, window: 1_000_000 }, rateLimits: [], changed: ['context'] } as never)
+  await clock.advance(200_000)
+
+  expect(toasts).toEqual([])
+  expect(notes).toEqual([])
+})

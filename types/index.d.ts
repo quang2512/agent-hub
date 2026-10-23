@@ -180,6 +180,8 @@ declare module 'claude-code' {
       rateLimits: RateLimitRow[]
       /** The shells the session spawned, oldest first: the latest MAX_SHELLS, every running one kept. */
       shells: ShellRow[]
+      /** The running agents the pane has said may be stuck, until they recover. */
+      alerted: string[]
       /** The person's prompts so far, counted: each one starts a task. */
       task: number
       /** The list shows every agent of the session, not only the latest task's. */

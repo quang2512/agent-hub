@@ -10,5 +10,14 @@
   "repository": "https://github.com/quang2512/agent-hub",
   "license": "MIT",
   "keywords": ["claude-code", "subagents", "monitor", "context-window", "usage-limits", "rate-limits", "tasks", "pane", "multi-agent", "remote-control"],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "alerts": {
+      "type": "string",
+      "title": "Alerts",
+      "description": "When a subagent may be stuck or the context window passes 80%: toast shows a toast in Claude Code; notify also sends a notification through your terminal's notification channel; off says nothing (the pane still shows it).",
+      "default": "toast",
+      "options": ["toast", "notify", "off"]
+    }
+  }
 }
