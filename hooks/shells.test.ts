@@ -43,6 +43,12 @@ describe('shells', () => {
     expect(readLog('\n[exited with code 2]\n')).toEqual({ tail: [], exitCode: 2 })
   })
 
+  test("a killed command's log ends `[killed]`, a trailer and not a line", () => {
+    expect(readLog('ready on :3000\n\n[killed]\n')).toEqual({ tail: ['ready on :3000'], isKilled: true })
+    expect(readLog('\n[killed]\n')).toEqual({ tail: [], isKilled: true })
+    expect(readLog('echo [killed] here\n').isKilled).toBeUndefined()
+  })
+
   test('a call that left its command in the background spawned a shell, its log the one the result names', () => {
     const text =
       'Command running in background with ID: bsrv1. Output is being written to: /private/tmp/claude-501/-p/sid/tasks/bsrv1.output. You will be notified.'
