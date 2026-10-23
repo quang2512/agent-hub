@@ -63,12 +63,14 @@ describe('layout', () => {
   test('styles survive the wrap', () => {
     const lines = wrapSegs([{ text: 'red words here', color: 'error' }, { text: ' dim tail', dim: true }], 9)
 
-    expect(lines.flat().filter(seg => seg.text.trim() !== '').map(seg => [seg.text, seg.color ?? '', seg.dim ?? false])).toEqual([
-      ['red', 'error', false],
-      ['words', 'error', false],
-      ['here', 'error', false],
-      ['dim', '', true],
-      ['tail', '', true],
+    // Words of one style on one row are one run.
+    expect(lines.map(line => line.map(seg => [seg.text, seg.color ?? '', seg.dim ?? false]))).toEqual([
+      [['red words', 'error', false]],
+      [
+        ['here', 'error', false],
+        [' dim', '', true],
+      ],
+      [['tail', '', true]],
     ])
   })
 })

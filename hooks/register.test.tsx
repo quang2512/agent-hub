@@ -1,4 +1,4 @@
-import type { AgentInfo, On } from 'claude-code'
+import type { AgentInfo, FoundElement, On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 const PANE_PROPS = {
@@ -21,6 +21,26 @@ function engine(on: On) {
   const clock = mock.clock(on, { now: 1_000_000 })
 
   return { roster, clock }
+}
+
+// The innermost Text showing `text`: `find` matches by inclusion and so
+// returns the row before the run of it that carries the style.
+async function leaf(ui: { findAll: (query: { type: string; text: string }) => Promise<FoundElement[]> }, text: string) {
+  const found = await ui.findAll({ type: 'Text', text })
+
+  return found.find(one => !one.children.some(child => typeof child === 'object' && child !== null && JSON.stringify(child).includes(text)))
+}
+
+// The session's start as the engine raises it before any prompt: the pane's
+// tick, which moves the clock it draws and reads the shells' logs, runs from
+// there. Its hooks go in with the test's own; the returned call starts it.
+function starts(on: On) {
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+
+  return ($: { session: { start: (e: never) => Promise<unknown> } }) =>
+    $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -166,7 +186,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await ui.press({ key: 'open:a1' })
     expect(await ui.find({ type: 'Text', text: 'Read the callers' })).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: 'Read the callers' }))?.props.bold).toBe(true)
+    expect((await leaf(ui, 'Read the callers'))?.props.bold).toBe(true)
 
     await ui.press({ key: 'back' })
     await $.turn.complete({
@@ -383,6 +403,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
 test('tokens move with each model step, the session cost and stuck agents show', async ($, on) => {
   const { roster, clock } = engine(on)
+  const start = starts(on)
   on('turn.step', async function* (_$, e) {
     return {
       turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn',
@@ -396,6 +417,7 @@ test('tokens move with each model step, the session cost and stuck agents show',
     // the stream passes through untouched
   }
   await $.session.measure({ context: { window: 1_000_000 }, rateLimits: [], cost: { usd: 1.234 }, changed: ['cost'] } as never)
+  await start($)
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
 
@@ -463,7 +485,8 @@ test('a card is one Button holding the whole card, wrapped to a narrow pane', as
   const top = (button?.text ?? '').split('\n')[0] ?? ''
   expect(top.startsWith('╭─ ● general-purpose ')).toBe(true)
   expect(top.endsWith(' 0:00 ─╮')).toBe(true)
-  expect(button?.text).not.toContain('…')
+  expect(button?.text).toContain('failures')
+  expect(button?.text?.replace('starting…', '')).not.toContain('…')
   for (const cardLine of (button?.text ?? '').split('\n')) expect(cardLine.length).toBe(30)
 })
 
@@ -484,8 +507,8 @@ test('the main conversation’s checklist shows as Tasks above Subagents', async
 
   expect(await ui.find({ type: 'Text', text: 'Tasks: 1 in progress · 1 done' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /✳ Building it…/ })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: 'Build it' }))?.props.bold).toBe(true)
-  expect((await ui.find({ type: 'Text', text: 'Plan the pane' }))?.props.strikethrough).toBe(true)
+  expect((await leaf(ui, 'Build it'))?.props.bold).toBe(true)
+  expect((await leaf(ui, 'Plan the pane'))?.props.strikethrough).toBe(true)
   expect(await ui.find({ type: 'Text', text: '✔' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '■' })).toBeDefined()
 
@@ -497,9 +520,10 @@ test('the main conversation’s checklist shows as Tasks above Subagents', async
 
 test('the main conversation’s calls are logged under the task in progress, folded when it is done', async ($, on) => {
   const { clock } = engine(on)
+  let next = 0
   on('tool.call', (_$, e) =>
     String(e.tool) === 'TaskCreate'
-      ? { result: { task: { id: '1', subject: 'Wire the pane' } }, text: 'ok' }
+      ? { result: { task: { id: String((next += 1)), subject: (e as { subject: string }).subject } }, text: 'ok' }
       : String(e.tool) === 'Bash'
         ? { result: {}, text: 'Error: tests failed', isError: true }
         : { result: { success: true }, text: 'ok' },
@@ -571,6 +595,45 @@ test('a subagent’s checklist written through the mod’s own tool shows in its
   expect(card).toContain('✳ Reading the layout file…')
 })
 
+test('an agent that ended with an item open shows it not done, none in progress', async ($, on) => {
+  const { roster, clock } = engine(on)
+  roster.list = [{ id: 'a1', type: 'Explore', description: 'list the exports', status: 'running' }]
+  await $.turn.start({ text: 'go', turnId: 't1', agentId: 'a1' })
+  await $.tool.call({
+    tool: 'mcp__agent-hub__checklist',
+    todos: [
+      { content: 'Read the file', status: 'completed' },
+      { content: 'Report back', status: 'in_progress', activeForm: 'Reporting back' },
+    ],
+    agentId: 'a1',
+  } as never)
+  roster.list = [{ id: 'a1', type: 'Explore', description: 'list the exports', status: 'completed' }]
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer' })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+  await ui.press({ key: 'open:a1' })
+
+  expect(await ui.find({ type: 'Text', text: 'Tasks: 1 not done · 1 done' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /in progress/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Reporting back/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '□' })).toBeDefined()
+})
+
+test('the focus ring starts on the first card, not on a toggle', async ($, on) => {
+  const { roster, clock } = engine(on)
+  roster.list = [
+    { id: 'a1', type: 'Explore', description: 'first', status: 'running' },
+    { id: 'a2', type: 'Plan', description: 'second', status: 'running' },
+  ]
+  await $.turn.start({ text: 'go', turnId: 't1', agentId: 'a1' })
+  await $.turn.start({ text: 'go', turnId: 't2', agentId: 'a2' })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  const focused = (await ui.findAll({ type: 'Button' })).filter(one => one.props.autoFocus === true)
+  expect(focused.map(one => one.key)).toEqual(['open:a1'])
+})
+
 test('in a card, the calls since an item began sit under it, aligned with the other items', async ($, on) => {
   const { roster, clock } = engine(on)
   on('tool.call', () => ({ result: {}, text: 'ok' }))
@@ -623,6 +686,7 @@ test('the context bar fills the pane width in proportion to the window', async (
 
 test('the main conversation’s cache hit and countdown sit under the context bar', async ($, on) => {
   const { clock } = engine(on)
+  const start = starts(on)
   on('turn.step', async function* (_$, e) {
     return {
       turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn',
@@ -630,10 +694,7 @@ test('the main conversation’s cache hit and countdown sit under the context ba
     } as never
   })
   // The countdown moves with the pane's tick, which session.start sets going.
-  on('command.register', () => ({ value: undefined }) as never)
-  on('ui.open', () => ({ value: undefined }) as never)
-  on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await start($)
   await $.session.measure({ context: { tokens: 230_000, window: 1_000_000, percent: 23 }, rateLimits: [], changed: ['context'] } as never)
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
   expect(await ui.find({ type: 'Text', text: /^Cache/ })).toBeUndefined()
@@ -810,10 +871,12 @@ test("the main conversation's foreground commands are the transcript's, not a sh
 test('a command moved to the background mid-run becomes a shell, its log found in the tasks dir', async ($, on) => {
   const { clock } = engine(on)
   const files = tasksDir(on)
+  const start = starts(on)
   on('tool.call', () => ({
     result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bbuild', backgroundedByUser: true },
     text: 'Command was manually backgrounded by user with ID: bbuild.',
   }))
+  await start($)
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
 
   await $.tool.call({ tool: 'Bash', command: 'npm run build', description: 'Build the app', tool_use_id: 'u1' } as never)
@@ -833,10 +896,12 @@ test('a command moved to the background mid-run becomes a shell, its log found i
 test("a background shell runs until its log's exit line, under the agent that started it", async ($, on) => {
   const { roster, clock } = engine(on)
   const files = tasksDir(on)
+  const start = starts(on)
   on('tool.call', () => ({
     result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsrv' },
     text: 'Command running in background with ID: bsrv. Output is being written to: /private/tmp/claude-501/-proj/sid/tasks/bsrv.output',
   }))
+  await start($)
   roster.list = [{ id: 'a1', type: 'Explore', description: 'serve it', status: 'running' }]
   await $.turn.start({ text: 'go', turnId: 't1', agentId: 'a1' })
   const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })

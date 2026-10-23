@@ -13,9 +13,18 @@ export const segLength = (segs: readonly Seg[]): number => segs.reduce((n, seg) 
 
 const isSpace = (text: string): boolean => /^\s+$/.test(text)
 
+const sameStyle = (a: Seg, b: Seg): boolean =>
+  a.color === b.color && a.dim === b.dim && a.bold === b.bold && a.strike === b.strike
+
 function trimEnd(line: Seg[]): Seg[] {
   const out = [...line]
-  while (out.length > 0 && isSpace(out[out.length - 1]!.text)) out.pop()
+  while (out.length > 0) {
+    const last = out[out.length - 1]!
+    const text = last.text.trimEnd()
+    if (text === last.text) break
+    if (text === '') out.pop()
+    else out[out.length - 1] = { ...last, text }
+  }
 
   return out
 }
@@ -32,8 +41,13 @@ export function wrapSegs(segs: readonly Seg[], width: number, hang = 0): Seg[][]
   const lines: Seg[][] = [[]]
   let used = 0
   let atStart = true
+  // A run joins the one before it when they share a style: a row is a few
+  // runs, not one per word.
   const put = (seg: Seg) => {
-    lines[lines.length - 1]!.push(seg)
+    const line = lines[lines.length - 1]!
+    const last = line.at(-1)
+    if (last !== undefined && sameStyle(last, seg)) line[line.length - 1] = { ...last, text: last.text + seg.text }
+    else line.push(seg)
     used += seg.text.length
     if (!isSpace(seg.text)) atStart = false
   }

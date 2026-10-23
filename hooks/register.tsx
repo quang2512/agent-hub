@@ -711,8 +711,12 @@ export const register: Register = on => {
     await $.tool
       .register({
         name: CHECKLIST,
+        // For any agent without a checklist tool of its own (subagents, and a
+        // main conversation whose build has none); one that has TodoWrite or
+        // TaskCreate keeps using those, which the pane follows as well.
         description:
           'Write your task checklist so the person can follow your progress live in the Agent Hub pane. ' +
+          'If TodoWrite or TaskCreate is already among your tools, use that instead. ' +
           'Send the whole list every time. Use it for any job of three or more steps: write the list first, ' +
           'mark an item in_progress when you start it and completed as soon as it is done, one in progress at a time.',
         inputSchema: CHECKLIST_SCHEMA,
@@ -1103,18 +1107,21 @@ export const register: Register = on => {
     // item while any is open, drawn as Claude Code draws its own list.
     const workingOf = (list: readonly TodoItem[]) => list.find(item => item.status === 'in_progress')
     const isOpen = (list: readonly TodoItem[]) => list.some(item => item.status !== 'completed')
-    const tallyOf = (list: readonly TodoItem[]) => {
+    // An agent that ended with items open left them undone: none is in progress any more.
+    const leftOf = (list: readonly TodoItem[]): TodoItem[] =>
+      list.map(item => (item.status === 'in_progress' ? { ...item, status: 'pending' } : item))
+    const tallyOf = (list: readonly TodoItem[], isOver = false) => {
       const parts = (['in_progress', 'pending', 'completed'] as const)
         .map(status => [status, list.filter(item => item.status === status).length] as const)
         .filter(([, count]) => count > 0)
-        .map(([status, count]) => `${count} ${TASK_WORD[status]}`)
+        .map(([status, count]) => `${count} ${isOver && status === 'pending' ? 'not done' : TASK_WORD[status]}`)
 
       return parts.length > 0 ? parts.join(' · ') : 'none'
     }
-    const taskHeading = (list: readonly TodoItem[], extra: readonly string[] = []) => (
+    const taskHeading = (list: readonly TodoItem[], extra: readonly string[] = [], isOver = false) => (
       <Text>
         <Text bold>
-          <Text color={TITLE_COLOR}>Tasks</Text>: {tallyOf(list)}
+          <Text color={TITLE_COLOR}>Tasks</Text>: {tallyOf(list, isOver)}
         </Text>
         <Text dimColor>{extra.filter(Boolean).map(part => ` · ${part}`).join('')}</Text>
       </Text>
@@ -1146,28 +1153,40 @@ export const register: Register = on => {
 
         return (
           <Box flexDirection="column" key={`task:${item.id}`}>
-            <Text>
-              <Text dimColor>{index === 0 ? '  ⎿ ' : '    '}</Text>
-              <Text color={TASK_COLOR[item.status]}>{TASK_GLYPH[item.status]}</Text>{' '}
-              <Text
-                bold={item.status === 'in_progress'}
-                dimColor={item.status === 'completed'}
-                strikethrough={item.status === 'completed'}
-              >
-                {item.text}
-              </Text>
-              {tally !== '' && <Text dimColor>{tally}</Text>}
-            </Text>
+            {/* The glyph in a column of its own: a long item wraps under its text, not under the glyph. */}
+            <Box flexDirection="row">
+              <Box flexShrink={0} marginRight={1}>
+                <Text>
+                  <Text dimColor>{index === 0 ? '  ⎿ ' : '    '}</Text>
+                  <Text color={TASK_COLOR[item.status]}>{TASK_GLYPH[item.status]}</Text>
+                </Text>
+              </Box>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text>
+                  <Text
+                    bold={item.status === 'in_progress'}
+                    dimColor={item.status === 'completed'}
+                    strikethrough={item.status === 'completed'}
+                  >
+                    {item.text}
+                  </Text>
+                  {tally !== '' && <Text dimColor>{tally}</Text>}
+                </Text>
+              </Box>
+            </Box>
             {item.status === 'in_progress' && earlier > 0 && (
               <Text dimColor>{`      … ${plural(earlier, 'earlier call')}`}</Text>
             )}
             {shownSteps.map(step => (
               <Box flexDirection="row" key={`task-step:${step.id}`} marginLeft={6}>
-                <Box flexGrow={1} flexShrink={1}>
+                <Box flexShrink={0} marginRight={1}>
                   <Text dimColor={step.status !== 'running'}>
                     <Text color={STEP_COLOR[step.status]}>{step.status === 'running' ? frame : STEP_GLYPH[step.status]}</Text>{' '}
-                    {step.tool} <Text dimColor>{step.note ? `${step.summary} — ${step.note}` : step.summary}</Text>
+                    {step.tool}
                   </Text>
+                </Box>
+                <Box flexGrow={1} flexShrink={1}>
+                  <Text dimColor>{step.note ? `${step.summary} — ${step.note}` : step.summary}</Text>
                 </Box>
                 <Box flexShrink={0} marginLeft={1}>
                   <Text dimColor>{stepTime(step)}</Text>
@@ -1219,8 +1238,9 @@ export const register: Register = on => {
     }
 
     // A card in the list is one Button, laid out by hand: Tab lands on the
-    // whole card and the ring inverts all of it; Enter opens it.
-    const card = (row: AgentRow, depth: number) => {
+    // whole card and the ring inverts all of it; Enter opens it. The ring
+    // starts on the first card when the pane takes the keys, not on a toggle.
+    const card = (row: AgentRow, depth: number, isFirst: boolean) => {
       const act = acts[row.id]
       const steps = act?.steps ?? []
       const isDone = isEnded(row.status)
@@ -1302,7 +1322,7 @@ export const register: Register = on => {
 
       return (
         <Box marginLeft={depth * 2} key={row.id}>
-          <Button key={openKey(row.id)} plain onPress={() => show($, row.id, 'back')}>
+          <Button key={openKey(row.id)} plain autoFocus={isFirst || undefined} onPress={() => show($, row.id, 'back')}>
             {drawLines(drawn)}
           </Button>
         </Box>
@@ -1398,9 +1418,9 @@ export const register: Register = on => {
 
           {act?.todos !== undefined && act.todos.length > 0 && (
             <Box flexDirection="column" marginTop={1}>
-              {taskHeading(act.todos)}
+              {taskHeading(isEnded(row.status) ? leftOf(act.todos) : act.todos, [], isEnded(row.status))}
               {!isEnded(row.status) && workingLine(act.todos)}
-              {taskItems(act.todos)}
+              {taskItems(isEnded(row.status) ? leftOf(act.todos) : act.todos)}
             </Box>
           )}
 
@@ -1432,14 +1452,18 @@ export const register: Register = on => {
                   {group.steps.map(step => (
                     <Box flexDirection="column" key={step.id}>
                       <Box flexDirection="row">
-                        <Box flexGrow={1} flexShrink={1}>
+                        {/* Glyph and tool in a column of their own: a long summary wraps under itself. */}
+                        <Box flexShrink={0} marginRight={1}>
                           <Text dimColor={step.status === 'done'}>
                             {'  '}
                             <Text color={STEP_COLOR[step.status]}>
                               {step.status === 'running' ? frame : STEP_GLYPH[step.status]}
                             </Text>{' '}
-                            {step.tool.padEnd(5)} <Text dimColor>{step.summary}</Text>
+                            {step.tool.padEnd(5)}
                           </Text>
+                        </Box>
+                        <Box flexGrow={1} flexShrink={1}>
+                          <Text dimColor>{step.summary}</Text>
                         </Box>
                         <Box flexShrink={0} marginLeft={1}>
                           <Text dimColor>{stepTime(step)}</Text>
@@ -1794,7 +1818,7 @@ export const register: Register = on => {
             </Box>
           )}
           {banner}
-          {lines.map(({ row, depth }) => card(row, depth))}
+          {lines.map(({ row, depth }, index) => card(row, depth, index === 0))}
           {lines.length > 0 && (
             <Text dimColor>
               {e.props.isFocused ? 'tab: next card · enter: open · e: compact/expand · a: all agents' : 'ctrl+x tab: select a card'}
