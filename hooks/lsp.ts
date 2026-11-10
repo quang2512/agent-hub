@@ -3,6 +3,7 @@
 // server status or diagnostics to a mod, so the calls are what the pane shows.
 
 import type { LspCall, LspCalls } from '../types'
+import { plural } from './card'
 
 /** The calls the group draws; older ones are only counted. */
 export const LSP_ROWS = 5
@@ -29,8 +30,6 @@ export function lspEndOf(ran: { deny?: string; isError?: boolean; text?: string;
 /** Ends a call still listed; one already scrolled off is left counted. */
 export const endLspCall = (lsp: LspCalls, id: string, change: Partial<LspCall>): LspCalls =>
   lsp.calls.some(one => one.id === id) ? { ...lsp, calls: lsp.calls.map(one => (one.id === id ? { ...one, ...change } : one)) } : lsp
-
-const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /** A call as its row reads after the glyph: operation, file:line, what it found. */
 export function lspLine(row: LspCall): string {

@@ -1014,7 +1014,7 @@ export const register: Register = on => {
   // An LSP call, the main conversation's or a subagent's: listed as it starts,
   // ended with what the language server found or why it failed.
   on('tool.call', { tool: 'LSP' }, async ($, e, next) => {
-    const id = e.tool_use_id ?? `lsp:${await $.clock.now().catch(() => 0)}`
+    const id = e.tool_use_id
     const row: LspCall = {
       id,
       operation: String(e.operation ?? ''),
@@ -1023,7 +1023,6 @@ export const register: Register = on => {
       ...(e.operation === 'workspaceSymbol' && typeof e.query === 'string' ? { query: e.query } : {}),
       ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
       status: 'running',
-      startedAt: await $.clock.now().catch(() => 0),
     }
     await update($, lsp, list => startLspCall(list, row)).catch(() => undefined)
     const ran = await next(e)
@@ -1857,6 +1856,7 @@ export const register: Register = on => {
 
     // The LSP calls: the latest few, one row each, the older ones counted.
     const lspEarlier = lspCalls.total - lspCalls.calls.length
+    const lspOwner = (one: LspCall) => (one.agentId === undefined ? '' : ` · ${rows[one.agentId]?.type ?? 'agent'}`)
     const lspGroup =
       lspCalls.total === 0 ? null : (
         <Box flexDirection="column">
@@ -1868,7 +1868,7 @@ export const register: Register = on => {
             <Text key={`lsp:${one.id}`} wrap="truncate-end">
               <Text color={LSP_COLOR[one.status]}>{one.status === 'running' ? frame : LSP_GLYPH[one.status]}</Text>{' '}
               <Text>{lspLine(one)}</Text>
-              {one.agentId !== undefined && <Text dimColor>{` · ${rows[one.agentId]?.type ?? 'agent'}`}</Text>}
+              {one.agentId !== undefined && <Text dimColor>{lspOwner(one)}</Text>}
             </Text>
           ))}
         </Box>

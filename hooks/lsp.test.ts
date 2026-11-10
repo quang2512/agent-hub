@@ -9,7 +9,6 @@ const call = (extra: Partial<LspCall> = {}): LspCall => ({
   filePath: '/repo/hooks/register.tsx',
   line: 986,
   status: 'running',
-  startedAt: 1000,
   ...extra,
 })
 

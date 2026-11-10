@@ -155,7 +155,6 @@ export type LspCall = {
   /** The subagent that made it; absent for the main conversation. */
   agentId?: string
   status: LspCallStatus
-  startedAt: number
   resultCount?: number
   fileCount?: number
   /** Why it failed: the error's first line, or the denial. */
