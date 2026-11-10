@@ -1007,6 +1007,33 @@ test("an LSP call shows in the LSP group as what it asked and found; none yet, n
   await ui.unmount()
 })
 
+test('/clear starts the LSP group over and drops the finished shells, keeping those still running', async ($, on) => {
+  const { clock } = engine(on)
+  tasksDir(on)
+  on('tool.call', (_$, e) =>
+    e.tool === 'Bash'
+      ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: `b${e.tool_use_id}` }, text: 'running in background' }
+      : { result: { operation: 'hover', result: 'type X', filePath: 'a.ts' }, text: 'type X' },
+  )
+  on('session.end', () => ({ sessionId: 's1' }))
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await $.tool.call({ tool: 'LSP', operation: 'hover', filePath: 'a.ts', line: 1, character: 1, tool_use_id: 'l1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', tool_use_id: 'live' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', tool_use_id: 'old' } as never)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'bold', tool_use_id: 's1' } as never)
+  await clock.advance(1000)
+  expect(await ui.find({ type: 'Text', text: /^LSP: 1 call$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 1 running · 1 done$/ })).toBeDefined()
+
+  await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  await clock.advance(1000)
+
+  expect(await ui.find({ type: 'Text', text: /^LSP/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Shells: 1 running · 0 done$/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('enter on a shell opens it whole: its command, every line it keeps, and back', async ($, on) => {
   const { clock } = engine(on)
   const files = tasksDir(on)

@@ -1011,6 +1011,18 @@ export const register: Register = on => {
     return ran
   })
 
+  // A /clear ends the conversation but not the process, and no session.start
+  // follows: the LSP calls and finished shells were the old conversation's.
+  // A shell still running may outlive it, so it stays, stoppable.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      await update($, lsp, () => ({ calls: [], total: 0 })).catch(() => undefined)
+      await update($, shells, list => list.filter(one => one.status === 'running')).catch(() => undefined)
+    }
+
+    return next(e)
+  })
+
   // An LSP call, the main conversation's or a subagent's: listed as it starts,
   // ended with what the language server found or why it failed.
   on('tool.call', { tool: 'LSP' }, async ($, e, next) => {
