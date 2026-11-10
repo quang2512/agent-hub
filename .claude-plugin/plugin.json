@@ -1,6 +1,6 @@
 {
   "name": "agent-hub",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Agent Hub: a live Claude Code pane for context fill, the task checklist, subagents, background shells and 5h/7d usage limits, with remote control from a phone",
   "author": {
     "name": "quang2512",
