@@ -990,6 +990,23 @@ test('no shell yet, no Shells group', async ($, on) => {
   await ui.unmount()
 })
 
+test("an LSP call shows in the LSP group as what it asked and found; none yet, no group", async ($, on) => {
+  const { clock } = engine(on)
+  on('tool.call', () => ({
+    result: { operation: 'findReferences', result: '…', filePath: '/repo/hooks/register.tsx', resultCount: 12, fileCount: 3 },
+    text: '…',
+  }))
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+  expect(await ui.find({ type: 'Text', text: /^LSP/ })).toBeUndefined()
+
+  await $.tool.call({ tool: 'LSP', operation: 'findReferences', filePath: '/repo/hooks/register.tsx', line: 986, character: 7, tool_use_id: 'l1' } as never)
+  await clock.advance(1000)
+
+  expect(await ui.find({ type: 'Text', text: /^LSP: 1 call$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'findReferences  register.tsx:986 · 12 results in 3 files' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('enter on a shell opens it whole: its command, every line it keeps, and back', async ($, on) => {
   const { clock } = engine(on)
   const files = tasksDir(on)

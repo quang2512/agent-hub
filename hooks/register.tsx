@@ -5,6 +5,8 @@ import type {
   AgentActivity,
   AgentRow,
   AgentRowStatus,
+  LspCall,
+  LspCallStatus,
   RemoteStatus,
   ShellRow,
   ShellStatus,
@@ -16,6 +18,7 @@ import type {
 } from '../types'
 import { contextView, share } from './context'
 import { innerWidth, MIN_CARD_WIDTH, plural, spinnerFrame, stripRoom } from './card'
+import { endLspCall, lspEndOf, lspLine, startLspCall } from './lsp'
 import { framed, row as layoutRow } from './layout'
 import type { Line, Seg } from './layout'
 import {
@@ -178,6 +181,9 @@ const breakdown = atom({ plugin: 'agent-hub', key: 'contextBreakdown' } as const
 const sessionCost = atom({ plugin: 'agent-hub', key: 'sessionCostUsd' } as const, null)
 const rateLimits = atom({ plugin: 'agent-hub', key: 'rateLimits' } as const, [])
 const shells = atom({ plugin: 'agent-hub', key: 'shells' } as const, [])
+const lsp = atom({ plugin: 'agent-hub', key: 'lsp' } as const, { calls: [], total: 0 })
+const LSP_GLYPH: Record<LspCallStatus, string> = { running: '●', done: '✓', failed: '✗' }
+const LSP_COLOR: Record<LspCallStatus, string> = { running: 'claude', done: 'success', failed: 'error' }
 const remote = atom({ plugin: 'agent-hub', key: 'remote' } as const, { status: 'off' })
 // The steps a running agent's expanded card lists, and the calls under its
 // item in progress: few, so a card stays short; a finished agent's card
@@ -1005,6 +1011,27 @@ export const register: Register = on => {
     return ran
   })
 
+  // An LSP call, the main conversation's or a subagent's: listed as it starts,
+  // ended with what the language server found or why it failed.
+  on('tool.call', { tool: 'LSP' }, async ($, e, next) => {
+    const id = e.tool_use_id ?? `lsp:${await $.clock.now().catch(() => 0)}`
+    const row: LspCall = {
+      id,
+      operation: String(e.operation ?? ''),
+      filePath: String(e.filePath ?? ''),
+      line: Number(e.line ?? 0),
+      ...(e.operation === 'workspaceSymbol' && typeof e.query === 'string' ? { query: e.query } : {}),
+      ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
+      status: 'running',
+      startedAt: await $.clock.now().catch(() => 0),
+    }
+    await update($, lsp, list => startLspCall(list, row)).catch(() => undefined)
+    const ran = await next(e)
+    await update($, lsp, list => endLspCall(list, id, lspEndOf(ran))).catch(() => undefined)
+
+    return ran
+  })
+
   // A background command stopped by its id ends its shell.
   on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
     const ran = await next(e)
@@ -1148,6 +1175,7 @@ export const register: Register = on => {
     const checklist = await read($, tasks)
     const logs = await read($, taskLogs)
     const shellRows = await read($, shells)
+    const lspCalls = await read($, lsp)
     const currentPrompt = await read($, task)
     const remoteState = await read($, remote)
     // The list keeps to the latest task unless the person asked for all;
@@ -1827,6 +1855,25 @@ export const register: Register = on => {
         </Box>
       )
 
+    // The LSP calls: the latest few, one row each, the older ones counted.
+    const lspEarlier = lspCalls.total - lspCalls.calls.length
+    const lspGroup =
+      lspCalls.total === 0 ? null : (
+        <Box flexDirection="column">
+          <Text bold>
+            <Text color={TITLE_COLOR}>LSP</Text>: {plural(lspCalls.total, 'call')}
+          </Text>
+          {lspEarlier > 0 && <Text dimColor>+{lspEarlier} earlier</Text>}
+          {lspCalls.calls.map(one => (
+            <Text key={`lsp:${one.id}`} wrap="truncate-end">
+              <Text color={LSP_COLOR[one.status]}>{one.status === 'running' ? frame : LSP_GLYPH[one.status]}</Text>{' '}
+              <Text>{lspLine(one)}</Text>
+              {one.agentId !== undefined && <Text dimColor>{` · ${rows[one.agentId]?.type ?? 'agent'}`}</Text>}
+            </Text>
+          ))}
+        </Box>
+      )
+
     // Remote control while it is on: the link to open on the phone, or how
     // the start goes.
     const remoteLabel = {
@@ -2085,6 +2132,8 @@ export const register: Register = on => {
           )}
           {shellGroup === null ? null : rule}
           {shellGroup}
+          {lspGroup === null ? null : rule}
+          {lspGroup}
           {remoteGroup === null ? null : rule}
           {remoteGroup}
         </Box>

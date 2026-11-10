@@ -142,6 +142,27 @@ export type ShellRow = {
   /** The log's size when last read; it is read again only when that changes. */
   size?: number
 }
+export type LspCallStatus = 'running' | 'done' | 'failed'
+/** One LSP tool call of the session: what Claude asked a language server and what came back. */
+export type LspCall = {
+  /** The call's tool_use_id. */
+  id: string
+  operation: string
+  filePath: string
+  line: number
+  /** The symbol searched for, workspaceSymbol only. */
+  query?: string
+  /** The subagent that made it; absent for the main conversation. */
+  agentId?: string
+  status: LspCallStatus
+  startedAt: number
+  resultCount?: number
+  fileCount?: number
+  /** Why it failed: the error's first line, or the denial. */
+  error?: string
+}
+/** The session's LSP calls: the latest few, and how many there were in all. */
+export type LspCalls = { calls: LspCall[]; total: number }
 /** Remote control as the pane shows it: the helper starting, its tunnel up, or why it failed. */
 export type RemoteStatus = {
   status: 'off' | 'starting' | 'on' | 'error'
@@ -195,6 +216,8 @@ declare module 'claude-code' {
       rateLimits: RateLimitRow[]
       /** The shells the session spawned, oldest first: the latest MAX_SHELLS, every running one kept. */
       shells: ShellRow[]
+      /** The session's LSP tool calls: the latest LSP_ROWS, and the count of all. */
+      lsp: LspCalls
       /** The person's prompts so far, counted: each one starts a task. */
       task: number
       /** The list shows every agent of the session, not only the latest task's. */
