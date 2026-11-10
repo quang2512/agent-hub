@@ -45,7 +45,7 @@ Shells: 1 running · 1 done
 5h 40% · ↻ 14:30   7d 12% · ↻ Thu 09:00
 ```
 
-- **Context**: how full the session's context window is, as one bar the width of the pane (red from 80%).
+- **Context**: how full the session's context window is, broken down as `/context` does: its grid of squares beside each category (system prompt, tools, MCP, memory files, skills, messages, free space, autocompact buffer) with its tokens and share; `c` folds it to one bar the width of the pane (red from 80%), the same bar shown before the first breakdown.
 - **Tasks**: the main conversation's checklist, with the tool calls made under the item in progress. A finished item folds to a count.
 - **Subagents**: one card per subagent of the latest prompt, plus any still running: its type, elapsed time, tokens, the steps it has taken and, if it keeps one, its checklist. A finished card folds to one line.
 - **Shells**: every shell the session spawns, as subagents are: a Bash command the main conversation or a subagent runs in the background, or moves there (Ctrl+B, a timeout). Each gets a small terminal, the command pinned on top and the latest lines of its output scrolling under it, until it exits with its code or is stopped (by Claude, from the tasks dialog, or when the agent that started it ends). Commands run in the foreground are left to the transcript. Output is read from the log Claude Code writes for the command, with colours and anything that looks like a secret removed; when the pane cannot find that log, the card says so after 10 seconds. Enter on a shell opens it whole: every line of the command, its last 40 lines of output, and every shell of the session.

@@ -152,6 +152,15 @@ export type RemoteStatus = {
   /** The link's QR code folded away in the pane. */
   isQrHidden?: boolean
 }
+/** The context window by category, as /context breaks it down. */
+export type ContextView = {
+  model: string
+  tokens: number
+  max: number
+  rows: { name: string; tokens: number; color: string; kind: 'used' | 'free' | 'buffer' | 'deferred' }[]
+  grid: { color: string; glyph: string }[][]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-hub': {
@@ -176,6 +185,10 @@ declare module 'claude-code' {
       context: { tokens: number; window: number } | null
       /** The prompt cache as the main conversation's latest request left it; null before one. */
       cache: CacheReading | null
+      /** The latest /context-style breakdown of the window; null before one. */
+      contextBreakdown: ContextView | null
+      /** The context section shows the /context breakdown; off, the one-line bar. */
+      isContextOpen: boolean
       /** What the whole session has cost, in US dollars, as /cost totals it; null before a reading. */
       sessionCostUsd: number | null
       /** The account's rate-limit windows, five hours first; empty off a subscription or before a reading. */

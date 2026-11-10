@@ -14,6 +14,7 @@ import type {
   TodoStatus,
   TurnEndReason,
 } from '../types'
+import { contextView, share } from './context'
 import { innerWidth, MIN_CARD_WIDTH, plural, spinnerFrame, stripRoom } from './card'
 import { framed, row as layoutRow } from './layout'
 import type { Line, Seg } from './layout'
@@ -162,6 +163,7 @@ const selected = atom({ plugin: 'agent-hub', key: 'selected' } as const, null)
 const selectedShell = atom({ plugin: 'agent-hub', key: 'selectedShell' } as const, null)
 const sendCount = atom({ plugin: 'agent-hub', key: 'sendCount' } as const, 0)
 const confirmStop = atom({ plugin: 'agent-hub', key: 'confirmStop' } as const, null)
+const isContextOpen = atom({ plugin: 'agent-hub', key: 'isContextOpen' } as const, true)
 const isExpanded = atom({ plugin: 'agent-hub', key: 'isExpanded' } as const, true)
 const EMPTY_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, model: '' }
 const task = atom({ plugin: 'agent-hub', key: 'task' } as const, 0)
@@ -172,6 +174,7 @@ const promptCache = atom({ plugin: 'agent-hub', key: 'cache' } as const, null)
 // window is 80% full (compaction is near); the rest a light shade.
 const BAR_COLOR = 'claude'
 const BAR_FULL_COLOR = 'error'
+const breakdown = atom({ plugin: 'agent-hub', key: 'contextBreakdown' } as const, null)
 const sessionCost = atom({ plugin: 'agent-hub', key: 'sessionCostUsd' } as const, null)
 const rateLimits = atom({ plugin: 'agent-hub', key: 'rateLimits' } as const, [])
 const shells = atom({ plugin: 'agent-hub', key: 'shells' } as const, [])
@@ -261,6 +264,48 @@ const shellKey = (id: string) => `shell:${id}`
 const historyKey = (id: string) => `history:${id}`
 
 let ticks = 0
+// The pane's width as last drawn: the breakdown's grid is asked for at it.
+let paneColumns = 80
+// The full grid (20 squares, 40 columns, for a 1M window) fits beside the
+// category list only from this width; below it the narrow grid is asked for.
+const WIDE_GRID_COLUMNS = 90
+// The context is measured off the hooks' path: a hook only asks, never waits.
+// Counted locally (no API call), one at a time, a burst folding into one more,
+// and at most once per MEASURE_GAP_MS so a run of quick results costs one count.
+const MEASURE_GAP_MS = 1500
+let isMeasuring = false
+let isMeasureDue = false
+let measuredAt = 0
+function measureBreakdown($: EngineInterface): void {
+  if (isMeasuring) {
+    isMeasureDue = true
+    return
+  }
+  isMeasuring = true
+  void (async () => {
+    try {
+      const wait = measuredAt + MEASURE_GAP_MS - (await $.clock.now())
+      if (wait > 0) await $.clock.sleep(wait)
+      measuredAt = await $.clock.now()
+      const { context } = await $.session.usage({
+        breakdown: 'summary',
+        columns: paneColumns >= WIDE_GRID_COLUMNS ? paneColumns : 79,
+      })
+      const tokens = context.tokens
+      if (tokens !== undefined) await update($, contextFill, () => ({ tokens, window: context.window }))
+      const b = context.breakdown
+      if (b !== undefined) await update($, breakdown, () => contextView(b))
+    } catch {
+      // No session bound yet, or the engine could not count: keep the last view.
+    } finally {
+      isMeasuring = false
+      if (isMeasureDue) {
+        isMeasureDue = false
+        measureBreakdown($)
+      }
+    }
+  })()
+}
 // Where the engine writes the session's command logs, when a result did not
 // name a shell's own. The module's own: a reload looks again.
 let tasksDir: string | undefined
@@ -807,6 +852,7 @@ export const register: Register = on => {
         ]),
       )
       .catch(() => undefined)
+    measureBreakdown($)
 
     return next(e)
   })
@@ -841,6 +887,7 @@ export const register: Register = on => {
     if (tokens !== undefined) {
       await update($, contextFill, () => ({ tokens, window: e.context.window })).catch(() => undefined)
     }
+    measureBreakdown($)
 
     return next(e)
   })
@@ -851,6 +898,8 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     const result = yield* next(e)
     const agentId = e.agentId
+    // Each response of the main conversation moves its context: measure it, unawaited.
+    if (agentId === undefined) measureBreakdown($)
     const usage = result.usage
     if (agentId !== undefined && usage !== null) {
       await update($, activity, a => applyStepUsage(a, agentId, usage)).catch(() => undefined)
@@ -971,102 +1020,109 @@ export const register: Register = on => {
   })
 
   // Watching must never stand in a tool's way: a failure here passes the call on.
-  on('tool.call', async ($, e, next) => {
-    const agentId = e.agentId
-    const tool = String(e.tool)
-    const args = Object.fromEntries(Object.entries(e).filter(([key]) => !RESERVED.has(key)))
+  // Each tool result of the main conversation adds to its context: measured
+  // once it lands, unawaited, the call's own handling below untouched.
+  on('tool.call', ($, e, next) => {
+    const pending = (async (): Promise<ToolCallResult> => {
+      const agentId = e.agentId
+      const tool = String(e.tool)
+      const args = Object.fromEntries(Object.entries(e).filter(([key]) => !RESERVED.has(key)))
 
-    // This mod's own checklist tool, answered here: a subagent's list goes to
-    // its card, the main conversation's to the Tasks group.
-    if (tool === CHECKLIST_TOOL) {
-      const asWrite = { todos: args.todos }
-      if (agentId === undefined) {
-        const before = await read($, tasks)
-        const planned = nextPlan(before, 'TodoWrite', asWrite, {})
-        if (planned !== undefined) {
-          const after = stampStarts(before, planned, await $.clock.now())
-          await update($, tasks, () => after)
-          await update($, currentTask, current => currentTaskAfter(before, after, current))
-        }
-      } else {
-        const t = await $.clock.now()
-        await update($, activity, a => applyPlan(a, agentId, 'TodoWrite', asWrite, {}, t))
-      }
-      const count = Array.isArray(args.todos) ? args.todos.length : 0
-
-      // A registered tool's result is text (or content blocks), never an object.
-      const saved = `Checklist saved (${plural(count, 'item')}); the person sees it in the Agent Hub pane.`
-
-      return { result: saved, text: saved }
-    }
-
-    // Remote control, this mod's other tool.
-    if (tool === REMOTE_TOOL) {
-      const said = await remoteAction($, String(args.action ?? 'status'))
-
-      return { result: said, text: said }
-    }
-
-    // Logs the call as a step of `key` in `log`, running until the call settles.
-    const logged = async (log: Log, key: string): Promise<ToolCallResult> => {
-      const t = await $.clock.now()
-      const stepId = e.tool_use_id ?? `${key}:${t}`
-      const step: StepRow = { id: stepId, tool, summary: summarize(tool, args), status: 'running', startedAt: t }
-      await writeLog($, log, a => applyStepStart(a, key, step))
-
-      // An Agent call is left unawaited: the hook stays out of the child's spawn,
-      // and the step settles when the call does.
-      if (tool === 'Agent') {
-        const pending = next(e)
-        void pending.then(
-          ran => endStep($, log, key, stepId, ran),
-          () => failStep($, log, key, stepId),
-        ).catch(() => undefined)
-
-        return pending
-      }
-      try {
-        const ran = await next(e)
-        await endStep($, log, key, stepId, ran)
-
-        return ran
-      } catch (error) {
-        await failStep($, log, key, stepId)
-        throw error
-      }
-    }
-
-    // The main conversation: its checklist calls keep the Tasks group current,
-    // and any other call is logged under the task it works on, if one.
-    if (agentId === undefined) {
-      if (PLAN_TOOLS.has(tool)) {
-        const ran = await next(e)
-        if (ran.deny === undefined && ran.isError !== true) {
+      // This mod's own checklist tool, answered here: a subagent's list goes to
+      // its card, the main conversation's to the Tasks group.
+      if (tool === CHECKLIST_TOOL) {
+        const asWrite = { todos: args.todos }
+        if (agentId === undefined) {
           const before = await read($, tasks)
-          const planned = nextPlan(before, tool, args, ran.result)
-          const after = planned === undefined ? undefined : stampStarts(before, planned, await $.clock.now())
-          if (after !== undefined) {
+          const planned = nextPlan(before, 'TodoWrite', asWrite, {})
+          if (planned !== undefined) {
+            const after = stampStarts(before, planned, await $.clock.now())
             await update($, tasks, () => after)
             await update($, currentTask, current => currentTaskAfter(before, after, current))
           }
+        } else {
+          const t = await $.clock.now()
+          await update($, activity, a => applyPlan(a, agentId, 'TodoWrite', asWrite, {}, t))
         }
+        const count = Array.isArray(args.todos) ? args.todos.length : 0
 
-        return ran
+        // A registered tool's result is text (or content blocks), never an object.
+        const saved = `Checklist saved (${plural(count, 'item')}); the person sees it in the Agent Hub pane.`
+
+        return { result: saved, text: saved }
       }
-      const taskId = TASK_TOOLS.has(tool) ? null : await read($, currentTask)
 
-      return taskId === null ? next(e) : logged('task', taskId)
-    }
+      // Remote control, this mod's other tool.
+      if (tool === REMOTE_TOOL) {
+        const said = await remoteAction($, String(args.action ?? 'status'))
 
-    const ran = logged('agent', agentId)
-    if (!PLAN_TOOLS.has(tool)) return ran
-    const settled = await ran
-    if (settled.deny === undefined && settled.isError !== true) {
-      const t = await $.clock.now()
-      await update($, activity, a => applyPlan(a, agentId, tool, args, settled.result, t))
-    }
+        return { result: said, text: said }
+      }
 
-    return settled
+      // Logs the call as a step of `key` in `log`, running until the call settles.
+      const logged = async (log: Log, key: string): Promise<ToolCallResult> => {
+        const t = await $.clock.now()
+        const stepId = e.tool_use_id ?? `${key}:${t}`
+        const step: StepRow = { id: stepId, tool, summary: summarize(tool, args), status: 'running', startedAt: t }
+        await writeLog($, log, a => applyStepStart(a, key, step))
+
+        // An Agent call is left unawaited: the hook stays out of the child's spawn,
+        // and the step settles when the call does.
+        if (tool === 'Agent') {
+          const pending = next(e)
+          void pending.then(
+            ran => endStep($, log, key, stepId, ran),
+            () => failStep($, log, key, stepId),
+          ).catch(() => undefined)
+
+          return pending
+        }
+        try {
+          const ran = await next(e)
+          await endStep($, log, key, stepId, ran)
+
+          return ran
+        } catch (error) {
+          await failStep($, log, key, stepId)
+          throw error
+        }
+      }
+
+      // The main conversation: its checklist calls keep the Tasks group current,
+      // and any other call is logged under the task it works on, if one.
+      if (agentId === undefined) {
+        if (PLAN_TOOLS.has(tool)) {
+          const ran = await next(e)
+          if (ran.deny === undefined && ran.isError !== true) {
+            const before = await read($, tasks)
+            const planned = nextPlan(before, tool, args, ran.result)
+            const after = planned === undefined ? undefined : stampStarts(before, planned, await $.clock.now())
+            if (after !== undefined) {
+              await update($, tasks, () => after)
+              await update($, currentTask, current => currentTaskAfter(before, after, current))
+            }
+          }
+
+          return ran
+        }
+        const taskId = TASK_TOOLS.has(tool) ? null : await read($, currentTask)
+
+        return taskId === null ? next(e) : logged('task', taskId)
+      }
+
+      const ran = logged('agent', agentId)
+      if (!PLAN_TOOLS.has(tool)) return ran
+      const settled = await ran
+      if (settled.deny === undefined && settled.isError !== true) {
+        const t = await $.clock.now()
+        await update($, activity, a => applyPlan(a, agentId, tool, args, settled.result, t))
+      }
+
+      return settled
+    })()
+    if (e.agentId === undefined) void pending.then(() => measureBreakdown($), () => undefined)
+
+    return pending
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -1084,6 +1140,8 @@ export const register: Register = on => {
     const expanded = await read($, isExpanded)
     const cost = await read($, sessionCost)
     const fill = await read($, contextFill)
+    const ctx = await read($, breakdown)
+    const isCtxOpen = await read($, isContextOpen)
     const cache = await read($, promptCache)
     const limits = await read($, rateLimits)
     const isAll = await read($, showAll)
@@ -1099,6 +1157,9 @@ export const register: Register = on => {
     const hidden = allLines.length - lines.length
     const frame = spinnerFrame(t, TICK_MS)
     const columns = e.props.bodyColumns
+    // A pane resized across the wide-grid line asks for the grid that fits beside the list.
+    if (columns >= WIDE_GRID_COLUMNS !== paneColumns >= WIDE_GRID_COLUMNS) measureBreakdown($)
+    paneColumns = columns
     // The agent whose transcript the main view shows, if any.
     const viewing = e.props.view.agentId
     const banner = viewing !== undefined && (
@@ -1845,19 +1906,82 @@ export const register: Register = on => {
       // One bar the pane's width, filled to the whole cell.
       const width = Math.max(1, columns)
       const full = Math.min(width, Math.round((percent / 100) * width))
+      const hasBreakdown = ctx !== null && ctx.grid.length > 0
+      // Headed as Tasks and Subagents are: the name bold in orange, the figures dim;
+      // once a breakdown is in, c toggles between it and the one-line bar.
+      const heading = (
+        <Box flexDirection="row" justifyContent="space-between" width={Math.max(1, columns)}>
+          {/* The breakdown open carries the figures itself: the heading is the name alone. */}
+          {hasBreakdown && isCtxOpen ? (
+            <Text bold color={TITLE_COLOR}>
+              Context
+            </Text>
+          ) : (
+            <Text>
+              <Text bold>
+                <Text color={TITLE_COLOR}>Context</Text>: {percent < 1 && fill.tokens > 0 ? '<1' : used}%
+              </Text>
+              <Text dimColor>
+                {' '}
+                · {formatTokens(fill.tokens)} / {formatTokens(fill.window)} tok
+              </Text>
+            </Text>
+          )}
+          {hasBreakdown && (
+            <Button
+              key="context"
+              plain
+              hotkey="c"
+              label={isCtxOpen ? 'compact' : 'details'}
+              onPress={() => update($, isContextOpen, isOn => !isOn)}
+            />
+          )}
+        </Box>
+      )
+
+      // As /context draws it: the grid of squares, the rows beside it.
+      if (ctx !== null && hasBreakdown && isCtxOpen) {
+        const gridWidth = Math.max(...ctx.grid.map(line => line.length)) * 2
+
+        return (
+          <Box flexDirection="column">
+            {heading}
+            <Box flexDirection="row" columnGap={2}>
+              <Box flexDirection="column" width={gridWidth} flexShrink={0}>
+                {ctx.grid.map((line, i) => (
+                  <Text key={`grid:${i}`}>
+                    {line.map((sq, j) => (
+                      <Text key={`sq:${i}:${j}`} color={sq.color}>
+                        {sq.glyph}{' '}
+                      </Text>
+                    ))}
+                  </Text>
+                ))}
+              </Box>
+              <Box flexDirection="column" flexShrink={1}>
+                <Text dimColor>
+                  {ctx.model} · {formatTokens(ctx.tokens)} / {formatTokens(ctx.max)} tok ({share(ctx.tokens, ctx.max)})
+                </Text>
+                {ctx.rows.map(r => (
+                  <Text key={`cat:${r.name}`}>
+                    <Text color={r.color}>
+                      {r.kind === 'free' ? '⛶' : r.kind === 'buffer' ? '⛝' : '⛁'}{' '}
+                    </Text>
+                    <Text dimColor={r.kind !== 'used'}>{r.name}</Text>
+                    <Text dimColor>
+                      : {formatTokens(r.tokens)} ({share(r.tokens, ctx.max)})
+                    </Text>
+                  </Text>
+                ))}
+              </Box>
+            </Box>
+          </Box>
+        )
+      }
 
       return (
         <Box flexDirection="column">
-          {/* Headed as Tasks and Subagents are: the name bold in orange, the figures dim. */}
-          <Text>
-            <Text bold>
-              <Text color={TITLE_COLOR}>Context</Text>: {percent < 1 && fill.tokens > 0 ? '<1' : used}%
-            </Text>
-            <Text dimColor>
-              {' '}
-              · {formatTokens(fill.tokens)} / {formatTokens(fill.window)} tok
-            </Text>
-          </Text>
+          {heading}
           <Text>
             <Text color={percent >= 80 ? BAR_FULL_COLOR : BAR_COLOR}>{'█'.repeat(full)}</Text>
             <Text color="inactive">{'░'.repeat(width - full)}</Text>
@@ -1956,7 +2080,7 @@ export const register: Register = on => {
           {lines.map(({ row, depth }, index) => card(row, depth, index === 0))}
           {lines.length > 0 && (
             <Text dimColor>
-              {e.props.isFocused ? 'tab: next card · enter: open · e: compact/expand · a: all agents' : 'ctrl+x tab: select a card'}
+              {e.props.isFocused ? 'tab: next card · enter: open · e: compact/expand · a: all agents · c: context' : 'ctrl+x tab: select a card'}
             </Text>
           )}
           {shellGroup === null ? null : rule}
