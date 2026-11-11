@@ -5,6 +5,8 @@ import type {
   AgentActivity,
   AgentRow,
   AgentRowStatus,
+  LspCall,
+  LspCallStatus,
   RemoteStatus,
   ShellRow,
   ShellStatus,
@@ -16,6 +18,7 @@ import type {
 } from '../types'
 import { contextView, share } from './context'
 import { innerWidth, MIN_CARD_WIDTH, plural, spinnerFrame, stripRoom } from './card'
+import { endLspCall, lspEndOf, lspLine, startLspCall } from './lsp'
 import { framed, row as layoutRow } from './layout'
 import type { Line, Seg } from './layout'
 import {
@@ -178,6 +181,9 @@ const breakdown = atom({ plugin: 'agent-hub', key: 'contextBreakdown' } as const
 const sessionCost = atom({ plugin: 'agent-hub', key: 'sessionCostUsd' } as const, null)
 const rateLimits = atom({ plugin: 'agent-hub', key: 'rateLimits' } as const, [])
 const shells = atom({ plugin: 'agent-hub', key: 'shells' } as const, [])
+const lsp = atom({ plugin: 'agent-hub', key: 'lsp' } as const, { calls: [], total: 0 })
+const LSP_GLYPH: Record<LspCallStatus, string> = { running: '●', done: '✓', failed: '✗' }
+const LSP_COLOR: Record<LspCallStatus, string> = { running: 'claude', done: 'success', failed: 'error' }
 const remote = atom({ plugin: 'agent-hub', key: 'remote' } as const, { status: 'off' })
 // The steps a running agent's expanded card lists, and the calls under its
 // item in progress: few, so a card stays short; a finished agent's card
@@ -406,12 +412,13 @@ async function tick($: EngineInterface) {
   if (ticks % SHELL_EVERY === 0) await pollShells($).catch(() => undefined)
   if (ticks % SYNC_EVERY === 0) void sync($).catch(() => undefined)
   const isShellBusy = (await read($, shells)).some(one => one.status === 'running')
+  const isLspBusy = (await read($, lsp)).calls.some(one => one.status === 'running')
   const isTaskBusy = Object.values(await read($, taskLogs)).some(log => log.steps.at(-1)?.status === 'running')
   const isTaskOpen = (await read($, tasks)).some(item => item.status === 'in_progress')
   // The cache countdown ticks until a tick past its expiry.
   const cache = await read($, promptCache)
   const isCacheWarm = cache !== null && (await read($, now)) < cache.at + CACHE_TTL_MS
-  if (hasActive(await read($, agents)) || isTaskBusy || isTaskOpen || isShellBusy || isCacheWarm) {
+  if (hasActive(await read($, agents)) || isTaskBusy || isTaskOpen || isShellBusy || isLspBusy || isCacheWarm) {
     const t = await $.clock.now()
     await update($, now, () => t)
   }
@@ -1005,6 +1012,48 @@ export const register: Register = on => {
     return ran
   })
 
+  // A /clear ends the conversation but not the process, and no session.start
+  // follows: the LSP calls and finished shells were the old conversation's.
+  // A shell still running may outlive it, so it stays, stoppable. The next
+  // conversation runs under a new session id, so its tasks dir is looked for again.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      tasksDir = undefined
+      polls = 0
+      await update($, lsp, () => ({ calls: [], total: 0 })).catch(() => undefined)
+      await update($, shells, list => list.filter(one => one.status === 'running')).catch(() => undefined)
+    }
+
+    return next(e)
+  })
+
+  // An LSP call, the main conversation's or a subagent's: listed as it starts,
+  // ended with what the language server found or why it failed.
+  on('tool.call', { tool: 'LSP' }, async ($, e, next) => {
+    const id = e.tool_use_id
+    const row: LspCall = {
+      id,
+      operation: String(e.operation ?? ''),
+      filePath: String(e.filePath ?? ''),
+      line: Number(e.line ?? 0),
+      ...(e.operation === 'workspaceSymbol' && typeof e.query === 'string' ? { query: e.query } : {}),
+      ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
+      status: 'running',
+    }
+    await update($, lsp, list => startLspCall(list, row)).catch(() => undefined)
+    let ran: Awaited<ReturnType<typeof next>>
+    try {
+      ran = await next(e)
+    } catch (error) {
+      // Aborted (Esc) or thrown: the row ends rather than spinning on.
+      await update($, lsp, list => endLspCall(list, id, { status: 'failed', error: 'cancelled' })).catch(() => undefined)
+      throw error
+    }
+    await update($, lsp, list => endLspCall(list, id, lspEndOf(ran))).catch(() => undefined)
+
+    return ran
+  })
+
   // A background command stopped by its id ends its shell.
   on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
     const ran = await next(e)
@@ -1148,6 +1197,7 @@ export const register: Register = on => {
     const checklist = await read($, tasks)
     const logs = await read($, taskLogs)
     const shellRows = await read($, shells)
+    const lspCalls = await read($, lsp)
     const currentPrompt = await read($, task)
     const remoteState = await read($, remote)
     // The list keeps to the latest task unless the person asked for all;
@@ -1681,7 +1731,8 @@ export const register: Register = on => {
     const shownShells = visibleShells(shellRows, currentPrompt)
     const shellsRunning = shellRows.filter(one => one.status === 'running').length
     const shellTime = (one: ShellRow) => formatElapsed(Math.max(0, (one.endedAt ?? Math.max(t, one.startedAt)) - one.startedAt))
-    const ownerOf = (one: ShellRow) => (one.agentId === undefined ? 'main' : (rows[one.agentId]?.type ?? 'agent'))
+    const agentName = (agentId: string) => rows[agentId]?.type ?? 'agent'
+    const ownerOf = (one: ShellRow) => (one.agentId === undefined ? 'main' : agentName(one.agentId))
     const endOf = (one: ShellRow) =>
       one.status === 'running'
         ? ''
@@ -1824,6 +1875,25 @@ export const register: Register = on => {
             </Text>
           </Text>
           {shownShells.map((one, index) => shellCard(one, lines.length === 0 && index === 0))}
+        </Box>
+      )
+
+    // The LSP calls: the latest few, one row each, the older ones counted.
+    const lspEarlier = lspCalls.total - lspCalls.calls.length
+    const lspGroup =
+      lspCalls.total === 0 ? null : (
+        <Box flexDirection="column">
+          <Text bold>
+            <Text color={TITLE_COLOR}>LSP</Text>: {plural(lspCalls.total, 'call')}
+          </Text>
+          {lspEarlier > 0 && <Text dimColor>+{lspEarlier} earlier</Text>}
+          {lspCalls.calls.map(one => (
+            <Text key={`lsp:${one.id}`} wrap="truncate-end">
+              <Text color={LSP_COLOR[one.status]}>{one.status === 'running' ? frame : LSP_GLYPH[one.status]}</Text>{' '}
+              <Text>{lspLine(one)}</Text>
+              {one.agentId !== undefined && <Text dimColor>{` · ${agentName(one.agentId)}`}</Text>}
+            </Text>
+          ))}
         </Box>
       )
 
@@ -2085,6 +2155,8 @@ export const register: Register = on => {
           )}
           {shellGroup === null ? null : rule}
           {shellGroup}
+          {lspGroup === null ? null : rule}
+          {lspGroup}
           {remoteGroup === null ? null : rule}
           {remoteGroup}
         </Box>
