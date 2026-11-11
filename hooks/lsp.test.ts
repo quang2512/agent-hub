@@ -31,15 +31,39 @@ describe('lsp', () => {
 
   test('the list keeps the latest LSP_ROWS calls and counts every one; an ended call ends in place', () => {
     let lsp: LspCalls = { calls: [], total: 0 }
-    for (let i = 1; i <= LSP_ROWS + 2; i += 1) lsp = startLspCall(lsp, call({ id: `t${i}` }))
+    for (let i = 1; i <= LSP_ROWS + 2; i += 1) lsp = startLspCall(lsp, call({ id: `t${i}`, status: 'done' }))
 
     expect(lsp.calls.map(one => one.id)).toEqual(['t3', 't4', 't5', 't6', 't7'])
     expect(lsp.total).toBe(7)
 
-    const ended = endLspCall(lsp, 't5', { status: 'done', resultCount: 2 })
+    const ended = endLspCall({ calls: [call({ id: 't5' })], total: 1 }, 't5', { status: 'done', resultCount: 2 })
     expect(ended.calls.find(one => one.id === 't5')).toMatchObject({ status: 'done', resultCount: 2 })
-    expect(ended.calls.filter(one => one.status === 'running')).toHaveLength(4)
     expect(endLspCall(lsp, 't1', { status: 'done' })).toEqual(lsp)
+  })
+
+  test('a call still running is never dropped: the oldest finished ones go first', () => {
+    let lsp: LspCalls = { calls: [], total: 0 }
+    lsp = startLspCall(lsp, call({ id: 'slow' }))
+    for (let i = 1; i <= LSP_ROWS; i += 1) lsp = startLspCall(lsp, call({ id: `d${i}`, status: 'done' }))
+    expect(lsp.calls.map(one => one.id)).toEqual(['slow', 'd2', 'd3', 'd4', 'd5'])
+
+    let busy: LspCalls = { calls: [], total: 0 }
+    for (let i = 1; i <= LSP_ROWS + 1; i += 1) busy = startLspCall(busy, call({ id: `r${i}` }))
+    expect(busy.calls).toHaveLength(LSP_ROWS + 1)
+    expect(busy.total).toBe(LSP_ROWS + 1)
+  })
+
+  test('a call seen again replaces its row and is counted once', () => {
+    const once = startLspCall({ calls: [], total: 0 }, call({ id: 'x' }))
+    const twice = startLspCall(once, call({ id: 'x', line: 2 }))
+    expect(twice).toEqual({ calls: [call({ id: 'x', line: 2 })], total: 1 })
+  })
+
+  test('a Windows path reads as its file name; a missing file or line is left out', () => {
+    expect(lspLine(call({ filePath: 'C:\\repo\\hooks\\register.tsx', line: 3 }))).toBe('findReferences  register.tsx:3')
+    expect(lspLine(call({ line: 0 }))).toBe('findReferences  register.tsx')
+    expect(lspLine(call({ line: Number.NaN }))).toBe('findReferences  register.tsx')
+    expect(lspLine(call({ operation: 'workspaceSymbol', filePath: '', line: 0 }))).toBe('workspaceSymbol')
   })
 
   test("a call ends as its result's counts, its error's first line, or its denial", () => {

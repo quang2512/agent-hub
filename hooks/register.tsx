@@ -412,12 +412,13 @@ async function tick($: EngineInterface) {
   if (ticks % SHELL_EVERY === 0) await pollShells($).catch(() => undefined)
   if (ticks % SYNC_EVERY === 0) void sync($).catch(() => undefined)
   const isShellBusy = (await read($, shells)).some(one => one.status === 'running')
+  const isLspBusy = (await read($, lsp)).calls.some(one => one.status === 'running')
   const isTaskBusy = Object.values(await read($, taskLogs)).some(log => log.steps.at(-1)?.status === 'running')
   const isTaskOpen = (await read($, tasks)).some(item => item.status === 'in_progress')
   // The cache countdown ticks until a tick past its expiry.
   const cache = await read($, promptCache)
   const isCacheWarm = cache !== null && (await read($, now)) < cache.at + CACHE_TTL_MS
-  if (hasActive(await read($, agents)) || isTaskBusy || isTaskOpen || isShellBusy || isCacheWarm) {
+  if (hasActive(await read($, agents)) || isTaskBusy || isTaskOpen || isShellBusy || isLspBusy || isCacheWarm) {
     const t = await $.clock.now()
     await update($, now, () => t)
   }
@@ -1013,9 +1014,12 @@ export const register: Register = on => {
 
   // A /clear ends the conversation but not the process, and no session.start
   // follows: the LSP calls and finished shells were the old conversation's.
-  // A shell still running may outlive it, so it stays, stoppable.
+  // A shell still running may outlive it, so it stays, stoppable. The next
+  // conversation runs under a new session id, so its tasks dir is looked for again.
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
+      tasksDir = undefined
+      polls = 0
       await update($, lsp, () => ({ calls: [], total: 0 })).catch(() => undefined)
       await update($, shells, list => list.filter(one => one.status === 'running')).catch(() => undefined)
     }
@@ -1037,7 +1041,14 @@ export const register: Register = on => {
       status: 'running',
     }
     await update($, lsp, list => startLspCall(list, row)).catch(() => undefined)
-    const ran = await next(e)
+    let ran: Awaited<ReturnType<typeof next>>
+    try {
+      ran = await next(e)
+    } catch (error) {
+      // Aborted (Esc) or thrown: the row ends rather than spinning on.
+      await update($, lsp, list => endLspCall(list, id, { status: 'failed', error: 'cancelled' })).catch(() => undefined)
+      throw error
+    }
     await update($, lsp, list => endLspCall(list, id, lspEndOf(ran))).catch(() => undefined)
 
     return ran
@@ -1720,7 +1731,8 @@ export const register: Register = on => {
     const shownShells = visibleShells(shellRows, currentPrompt)
     const shellsRunning = shellRows.filter(one => one.status === 'running').length
     const shellTime = (one: ShellRow) => formatElapsed(Math.max(0, (one.endedAt ?? Math.max(t, one.startedAt)) - one.startedAt))
-    const ownerOf = (one: ShellRow) => (one.agentId === undefined ? 'main' : (rows[one.agentId]?.type ?? 'agent'))
+    const agentName = (agentId: string) => rows[agentId]?.type ?? 'agent'
+    const ownerOf = (one: ShellRow) => (one.agentId === undefined ? 'main' : agentName(one.agentId))
     const endOf = (one: ShellRow) =>
       one.status === 'running'
         ? ''
@@ -1868,7 +1880,6 @@ export const register: Register = on => {
 
     // The LSP calls: the latest few, one row each, the older ones counted.
     const lspEarlier = lspCalls.total - lspCalls.calls.length
-    const lspOwner = (one: LspCall) => (one.agentId === undefined ? '' : ` · ${rows[one.agentId]?.type ?? 'agent'}`)
     const lspGroup =
       lspCalls.total === 0 ? null : (
         <Box flexDirection="column">
@@ -1880,7 +1891,7 @@ export const register: Register = on => {
             <Text key={`lsp:${one.id}`} wrap="truncate-end">
               <Text color={LSP_COLOR[one.status]}>{one.status === 'running' ? frame : LSP_GLYPH[one.status]}</Text>{' '}
               <Text>{lspLine(one)}</Text>
-              {one.agentId !== undefined && <Text dimColor>{lspOwner(one)}</Text>}
+              {one.agentId !== undefined && <Text dimColor>{` · ${agentName(one.agentId)}`}</Text>}
             </Text>
           ))}
         </Box>

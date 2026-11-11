@@ -8,11 +8,18 @@ import { plural } from './card'
 /** The calls the group draws; older ones are only counted. */
 export const LSP_ROWS = 5
 
-/** Adds a call, keeping the latest LSP_ROWS. */
-export const startLspCall = (lsp: LspCalls, row: LspCall): LspCalls => ({
-  calls: [...lsp.calls.filter(one => one.id !== row.id), row].slice(-LSP_ROWS),
-  total: lsp.total + 1,
-})
+/**
+ * Adds a call, keeping LSP_ROWS: the oldest finished ones go first, so a call
+ * still running stays until it ends. A call seen again is counted once.
+ */
+export function startLspCall(lsp: LspCalls, row: LspCall): LspCalls {
+  const isNew = !lsp.calls.some(one => one.id === row.id)
+  const all = [...lsp.calls.filter(one => one.id !== row.id), row]
+  let extra = all.length - LSP_ROWS
+  const calls = all.filter(one => (extra > 0 && one.status !== 'running' ? (extra -= 1) < 0 : true))
+
+  return { calls, total: lsp.total + (isNew ? 1 : 0) }
+}
 
 /** How a call ended, from what the tool answered: its counts, its error's first line, or its denial. */
 export function lspEndOf(ran: { deny?: string; isError?: boolean; text?: string; result?: unknown }): Partial<LspCall> {
@@ -33,7 +40,9 @@ export const endLspCall = (lsp: LspCalls, id: string, change: Partial<LspCall>):
 
 /** A call as its row reads after the glyph: operation, file:line, what it found. */
 export function lspLine(row: LspCall): string {
-  const where = row.query !== undefined ? `"${row.query}"` : `${row.filePath.split('/').at(-1) ?? row.filePath}:${row.line}`
+  const name = row.filePath.split(/[\\/]/).at(-1) ?? ''
+  const at = Number.isFinite(row.line) && row.line > 0 ? `:${row.line}` : ''
+  const where = row.query !== undefined ? `"${row.query}"` : name === '' ? '' : `${name}${at}`
   const found =
     row.error !== undefined
       ? ` · ${row.error}`
@@ -41,5 +50,5 @@ export function lspLine(row: LspCall): string {
         ? ''
         : ` · ${plural(row.resultCount, 'result')}${row.fileCount === undefined ? '' : ` in ${plural(row.fileCount, 'file')}`}`
 
-  return `${row.operation}  ${where}${found}`
+  return `${row.operation}${where === '' ? '' : `  ${where}`}${found}`
 }

@@ -1007,6 +1007,21 @@ test("an LSP call shows in the LSP group as what it asked and found; none yet, n
   await ui.unmount()
 })
 
+test('an LSP call that is aborted ends its row as cancelled, not spinning on', async ($, on) => {
+  const { clock } = engine(on)
+  on('tool.call', () => {
+    throw new Error('aborted')
+  })
+  const ui = await $.ui.mount({ plugin: 'agent-hub', surface: 'terminal', component: 'Pane', requestId: 'agent-hub', props: PANE_PROPS })
+
+  await expect($.tool.call({ tool: 'LSP', operation: 'hover', filePath: 'a.ts', line: 1, character: 1, tool_use_id: 'l1' } as never)).rejects.toThrow()
+  await clock.advance(1000)
+
+  expect(await ui.find({ type: 'Text', text: 'hover  a.ts:1 · cancelled' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '✗' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('/clear starts the LSP group over and drops the finished shells, keeping those still running', async ($, on) => {
   const { clock } = engine(on)
   tasksDir(on)
